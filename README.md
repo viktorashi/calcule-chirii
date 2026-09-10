@@ -1,3 +1,14 @@
+Usage:
+
+Instalați [just](https://github.com/casey/just), și R cum vă place (eu îl am prin `mise`) căutați voi pe net lol
+și doar
+
+```bash
+just
+```
+
+----------
+
 Am văzut ca (cel puțin în Cluj) tot mai mulți prorietari cer chiria in EURO in contract (sau echivalent BNR, care trebuie recalculat în fiecare lună) și refuză sa aiba un pret fix in RON. Așa că m-am gândit la un tool să vă ajute să negociați mai bine niște clauze mai deștepte în contractele de închiere:
 Posibilitatea plății în avans cu N luni (pentru a amortiza deprecierea)
 și / sau cererea unui plafon (care mă gândesc că trebuie ales cât să nu dea prea tare la ochi)
@@ -10,7 +21,7 @@ Screenshoturile ar fi economiile mele reale dupa 3 ani de chirie dacă chiar zic
 
 Nu am explitat tot ce-i pe-acolo dar ar trebui să fie (sper) self-explanatory.
 
--------------
+----------
 
 ### Slopuială scrisă de dânsu
 
