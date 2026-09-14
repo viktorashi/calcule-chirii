@@ -1,3 +1,6 @@
+![poza1](./ss-1.png)
+![poza2](./ss-2.png)
+
 Usage:
 
 Instalați [just](https://github.com/casey/just), și R cum vă place (eu îl am prin `mise`) căutați voi pe net lol
