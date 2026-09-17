@@ -18,7 +18,15 @@ library(bslib)
 
 # ---- date implicite ----------------------------------------
 DEFAULT_CSV <- "date_curs.csv"
-CHIRIE_EUR  <- 500
+source("R/model.R")
+
+month_input <- function() {
+  picker <- dateInput("luna_start", "Prima lună de chirie",
+                      value = format(Sys.Date(), "%Y-%m-01"),
+                      format = "mm/yyyy", startview = "year", language = "ro")
+  picker$children[[2]]$attribs[["data-date-min-view-mode"]] <- "months"
+  picker
+}
 
 # # ---- UI ----------------------------------------------------
 ui <- page_navbar(
@@ -30,8 +38,8 @@ ui <- page_navbar(
     h4("⚙️ Parametri Generali"),
     numericInput("chirie_eur", "Chirie lunară (EUR)",
                  value = 500, min = 50, max = 5000, step = 25),
-    numericInput("curs_prima_luna", "Curs BNR prima lună (RON/EUR)",
-                 value = 5.26, min = 4.00, max = 8.00, step = 0.01),
+    month_input(),
+    textOutput("curs_selectat"),
     sliderInput("durata", "Durata șederii (luni)",
                 min = 1, max = 36, value = 36, step = 1),
     hr(),
@@ -43,9 +51,10 @@ ui <- page_navbar(
                   min = 4.80, max = 6.00, value = 5.30, step = 0.01)
     ),
     hr(),
-    h5("Date curs BNR"),
+    h5("Date curs EUR/RON"),
     fileInput("csv_upload", "Încarcă CSV propriu curs", accept = ".csv"),
-    helpText("Opțional. Default conține prognoza 2026-2029.")
+    helpText("CSV: month (AAAA-LL), eur_ron. Datele implicite sunt prognoze 2026–2029, nu cursuri BNR observate."),
+    helpText("Rezultatele sunt estimări pe baza CSV-ului selectat.")
   ),
   nav_spacer(),
 
@@ -58,7 +67,7 @@ ui <- page_navbar(
         open = "closed",
         h5("Opțiuni afișare Tab 1"),
         radioButtons("mod_vedere_tab1", "Perspectivă afișare:",
-                     choices = c("Bani plătiți în plus (depreciere leu & cost lipsă plafon)" = "pierdere",
+                     choices = c("Diferență netă față de cursul primei luni" = "pierdere",
                                  "Economie generată de plafon" = "economie"),
                      selected = "pierdere"),
         helpText("Parametrii generali de curs, chirie și plafon sunt sincronizați din bara laterală principală.")
@@ -91,7 +100,7 @@ ui <- page_navbar(
         helpText("Primești salariul în RON și achiți direct proprietarului în RON la cursul oficial BNR, fără comisioane bancare/valutare."),
         sliderInput("c2_n", "n = luni achitate odată (în avans)", 1, 12, 3, 1),
         hr(),
-        h5("Garanție / Avans (RON)"),
+        h5("Garanție (RON)"),
         numericInput("c2_avans_luni", "Garanție inițială (luni chirii)",
                      value = 1, min = 0, max = 6, step = 1),
         sliderInput("c2_restituire_pct", "% din garanție recuperat la plecare",
@@ -111,7 +120,7 @@ ui <- page_navbar(
       fluidRow(
         column(12,
           h5("Sinteză comparativă strategii (pentru durata selectată)"),
-          tableOutput("tabel_comparare")
+          div(style = "overflow-x: auto;", tableOutput("tabel_comparare"))
         )
       ),
       fluidRow(
@@ -122,8 +131,10 @@ ui <- page_navbar(
               tags$li("Fără comisioane bancare sau de schimb valutar (nu cumperi valută prin bănci/Revolut cu spread)."),
               tags$li("Plata anticipată pe ", tags$b("n luni"), " blochează cursul BNR din prima lună a blocului pentru toată perioada de n luni."),
               tags$li("Dacă leul se depreciază în lunile 2, 3, etc., plata în avans te protejează, economisind diferența de curs."),
+              tags$li("Ultimul bloc acoperă doar lunile rămase din ședere. Graficul repartizează chiria pe lunile acoperite, chiar dacă plata se face anticipat."),
+              tags$li("Garanția se calculează la cursul inițial al fiecărei strategii și se restituie ca procent din aceeași sumă în RON."),
               tags$li("Dacă plafonul este activ, cursul aplicat este limitat la valoarea plafonului."),
-              tags$li("Simularea calculează exact câți lei plătești în plus exclusiv din cauza creșterii cursului EUR/RON față de luna 1.")
+              tags$li("Diferențele față de luna 1 includ și scăderile cursului. Economie negativă = cost suplimentar. Graficele și cardurile exclud garanția; tabelul include și costul ei net.")
             )
           )
         )
@@ -135,77 +146,62 @@ ui <- page_navbar(
 # ---- SERVER ------------------------------------------------
 server <- function(input, output, session) {
 
-  # ---- date curs (reactiv) -----------------------------------
   date_curs <- reactive({
-    df <- if (!is.null(input$csv_upload)) {
-      tryCatch(read.csv(input$csv_upload$datapath, stringsAsFactors = FALSE),
-               error = function(e) read.csv(DEFAULT_CSV, stringsAsFactors = FALSE))
-    } else {
-      read.csv(DEFAULT_CSV, stringsAsFactors = FALSE)
-    }
-    # validare coloane
-    req("month" %in% names(df), "eur_ron" %in% names(df))
-    df$month  <- as.character(df$month)
-    df$eur_ron <- as.numeric(df$eur_ron)
-    df <- df[!is.na(df$eur_ron), ]
-    df <- df[order(df$month), ]
-    
-    # ajustare automată dinamică a duratei dacă CSV-ul are alt număr de luni
-    total_luni <- nrow(df)
-    updateSliderInput(session, "durata", max = total_luni)
-    updateSliderInput(session, "c2_n", max = min(total_luni, 12))
-    
-    df
+    path <- if (is.null(input$csv_upload)) DEFAULT_CSV else input$csv_upload$datapath
+    tryCatch(read_rates(path), error = function(e) {
+      validate(need(FALSE, conditionMessage(e)))
+    })
   })
 
-  # suprascrie cursul primei luni cu valoarea introdusă manual
-  date_curs_ajustat <- reactive({
+  observe({
     df <- date_curs()
-    if (nrow(df) == 0) return(df)
-    df$eur_ron[1] <- input$curs_prima_luna
-    df
+    updateDateInput(session, "luna_start",
+                    min = as.Date(paste0(df$month[1], "-01")),
+                    max = as.Date(paste0(tail(df$month, 1), "-01")))
   })
 
-  # ---- helper: trunchiază la durata selectată ----------------
-  trunca <- function(df, durata) {
-    n <- min(durata, nrow(df))
-    df[seq_len(n), , drop = FALSE]
-  }
+  date_curs_ajustat <- reactive({
+    validate(need(length(input$luna_start) == 1 && !is.na(input$luna_start),
+                  "Alege o lună disponibilă din calendar."))
+    df <- date_curs()
+    month <- format(as.Date(input$luna_start), "%Y-%m")
+    validate(need(month %in% df$month,
+                  "Luna aleasă nu există în CSV. Alege o lună disponibilă sau încarcă alte date."))
+    df[df$month >= month, , drop = FALSE]
+  })
+
+  observe({
+    total <- nrow(date_curs_ajustat())
+    updateSliderInput(session, "durata", max = total,
+                      value = min(isolate(input$durata) %||% 36, total))
+    updateSliderInput(session, "c2_n", max = min(total, 12),
+                      value = min(isolate(input$c2_n) %||% 3, total, 12))
+  })
+
+  output$curs_selectat <- renderText({
+    df <- date_curs_ajustat()
+    paste0("Curs din CSV: ", sprintf("%.4f", df$eur_ron[1]),
+           " RON/EUR · ", nrow(df), " luni disponibile")
+  })
+
+  parametri <- reactive({
+    valid_number <- function(x, low, high, integer = FALSE) {
+      is.numeric(x) && length(x) == 1 && is.finite(x) &&
+        x >= low && x <= high && (!integer || x == floor(x))
+    }
+    validate(need(valid_number(input$chirie_eur, 50, 5000), "Chiria trebuie să fie între 50 și 5000 EUR."),
+             need(valid_number(input$durata, 1, 10000, TRUE), "Durata trebuie să fie un număr întreg pozitiv."),
+             need(isTRUE(input$fara_plafon) || valid_number(input$plafon, 4.8, 6), "Plafon invalid."))
+    list(chirie = input$chirie_eur,
+         pl = if (isTRUE(input$fara_plafon)) Inf else input$plafon)
+  })
 
   # ============================================================
   #  TAB 1 — PLAFON & DEPRECIERE (BANI ÎN PLUS VS ECONOMIE)
   # ============================================================
   calc_tab1 <- reactive({
-    df  <- trunca(date_curs_ajustat(), input$durata)
-    req(nrow(df) > 0)
-    
-    chirie  <- req(input$chirie_eur)
-    fara_pl <- isTRUE(input$fara_plafon)
-    pl      <- if (fara_pl) Inf else input$plafon
-    
-    curs_baza <- df$eur_ron[1]
-    
-    df$curs_aplicat       <- pmin(df$eur_ron, pl)
-    df$plata_fara         <- chirie * df$eur_ron
-    df$plata_cu           <- chirie * df$curs_aplicat
-    
-    # Economie datorată plafonului față de plata fără plafon
-    df$economie_luna      <- pmax(chirie * (df$eur_ron - pl), 0)
-    df$economie_cum       <- cumsum(df$economie_luna)
-    
-    # Bani plătiți în plus din deprecierea leului (față de cursul primei luni):
-    # Fără plafon:
-    df$plus_depreciere_fara_plafon <- pmax(chirie * (df$eur_ron - curs_baza), 0)
-    df$plus_depreciere_fara_cum    <- cumsum(df$plus_depreciere_fara_plafon)
-    
-    # Cu plafon (cât plătești efectiv în plus față de luna 1):
-    df$plus_depreciere_cu_plafon   <- pmax(chirie * (df$curs_aplicat - curs_baza), 0)
-    df$plus_depreciere_cu_cum      <- cumsum(df$plus_depreciere_cu_plafon)
-    
-    # Indicator: atinge sau depășește plafonul?
-    df$loveste_plafon     <- !fara_pl & (df$eur_ron >= pl)
-    df$luna_idx           <- seq_len(nrow(df))
-    df
+    p <- parametri()
+    calculate_cap(trunca(date_curs_ajustat(), input$durata), p$chirie, p$pl)
   })
 
   output$big_number_ui <- renderUI({
@@ -224,15 +220,15 @@ server <- function(input, output, session) {
         div(
           style = "text-align:center; padding:18px;",
           h2(style = "color:#c0392b; font-size:2.3em;",
-             paste0("Plătești în plus ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
+             paste0("Diferență netă: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#7f8c8d;",
-             paste0("în ", luni, " luni DOAR din cauza deprecierii leului (fără niciun plafon de protecție)"))
+             paste0("în ", luni, " luni față de cursul primei luni (fără niciun plafon de protecție)"))
         )
       } else {
         div(
           style = "text-align:center; padding:18px;",
           h2(style = "color:#d35400; font-size:2.2em;",
-             paste0("Fără plafon ai pierde ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei în plus")),
+             paste0("Fără plafon, diferență netă: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#27ae60; font-weight:600;",
              paste0("Plafonul de ", pl, " RON/EUR te protejează: economisești ", 
                     format(economie_totala, big.mark = ".", decimal.mark = ","), " lei (plafon atins în ", luni_plafonate, " din ", luni, " luni)"))
@@ -245,7 +241,7 @@ server <- function(input, output, session) {
           style = "text-align:center; padding:18px;",
           h3(style = "color:#e67e22;",
              if (fara_pl) "Plafonul este dezactivat (∞). Nu există economie de plafonare."
-             else paste0("Plafonul de ", pl, " RON/EUR nu este atins în niciuna dintre cele ", luni, " luni.")),
+             else paste0("Plafonul de ", pl, " RON/EUR nu generează economii în cele ", luni, " luni.")),
           h4(style = "color:#7f8c8d;", "→ Economia datorată plafonului este 0 lei.")
         )
       } else {
@@ -271,15 +267,17 @@ server <- function(input, output, session) {
     if (mod == "pierdere") {
       # Grafic: Bani plătiți în plus din cauza deprecierii leului
       p <- p +
-        geom_col(aes(y = plus_depreciere_fara_plafon, fill = "Pierdere lunară (depreciere leu fără plafon)"),
+        geom_col(aes(y = plus_depreciere_fara_plafon, fill = "Diferență lunară față de luna 1 (fără plafon)"),
                  alpha = 0.45, width = 0.6) +
-        geom_line(aes(y = plus_depreciere_fara_cum, color = "Total pierdut cumulativ (fără plafon)"),
-                  linewidth = 1.3, linetype = "dashed")
+        geom_line(aes(y = plus_depreciere_fara_cum, color = "Diferență netă cumulată (fără plafon)"),
+                  linewidth = 1.3, linetype = "dashed") +
+        geom_point(aes(y = plus_depreciere_fara_cum, color = "Diferență netă cumulată (fără plafon)"), size = 2)
       
       if (!fara_pl) {
         p <- p +
-          geom_line(aes(y = plus_depreciere_cu_cum, color = "Cost suplimentar efectiv suportat (cu plafon)"),
-                    linewidth = 1.4)
+          geom_line(aes(y = plus_depreciere_cu_cum, color = "Diferență netă cumulată (cu plafon)"),
+                    linewidth = 1.4) +
+          geom_point(aes(y = plus_depreciere_cu_cum, color = "Diferență netă cumulată (cu plafon)"), size = 2)
       }
       
       # Marcare puncte de lovire a plafonului
@@ -292,13 +290,13 @@ server <- function(input, output, session) {
       }
       
       p <- p +
-        scale_fill_manual(values = c("Pierdere lunară (depreciere leu fără plafon)" = "#e74c3c")) +
-        scale_color_manual(values = c("Total pierdut cumulativ (fără plafon)" = "#c0392b",
-                                     "Cost suplimentar efectiv suportat (cu plafon)" = "#27ae60")) +
+        scale_fill_manual(values = c("Diferență lunară față de luna 1 (fără plafon)" = "#e74c3c")) +
+        scale_color_manual(values = c("Diferență netă cumulată (fără plafon)" = "#c0392b",
+                                     "Diferență netă cumulată (cu plafon)" = "#27ae60")) +
         scale_shape_manual(values = c("⚡ Plafon atins/depășit (curs >= plafon)" = 18)) +
         labs(
-          title = if (fara_pl) "Câți bani pierzi din deprecierea leului (Fără niciun plafon)"
-                  else paste0("Câți bani ai pierde fără plafon vs. Protecția plafonului de ", pl, " RON/EUR"),
+          title = if (fara_pl) "Diferență față de cursul primei luni (fără plafon)"
+                  else paste0("Diferență față de luna 1, fără și cu plafon de ", pl, " RON/EUR"),
           subtitle = paste0("Chirie: ", input$chirie_eur, " EUR | Curs inițial: ", df$eur_ron[1], " RON/EUR | Punctele roșii indică lunile unde intervine plafonul"),
           x = "Luna", y = "RON", fill = NULL, color = NULL, shape = NULL
         )
@@ -326,7 +324,7 @@ server <- function(input, output, session) {
         labs(
           title = if (fara_pl) "Plafon dezactivat (Economie = 0)"
                   else paste0("Economie datorată plafonului de ", pl, " RON/EUR"),
-          subtitle = paste0("Chirie: ", input$chirie_eur, " EUR/lună | Punctele roșii marchează când plafonul generează economii"),
+          subtitle = paste0("Chirie: ", input$chirie_eur, " EUR/lună | Punctele roșii marchează atingerea plafonului"),
           x = "Luna", y = "RON", fill = NULL, color = NULL, shape = NULL
         )
     }
@@ -354,7 +352,7 @@ server <- function(input, output, session) {
       `Plafon activ?`         = ifelse(df$loveste_plafon, "⚡ DA", "nu"),
       `Plată fără plafon`     = sprintf("%.2f lei", df$plata_fara),
       `Plată cu plafon`       = sprintf("%.2f lei", df$plata_cu),
-      `Plătit în plus (depr.)` = sprintf("%.2f lei", df$plus_depreciere_fara_cum),
+      `Diferență netă cumulată` = sprintf("%.2f lei", df$plus_depreciere_fara_cum),
       `Economie plafon cum.`  = sprintf("%.2f lei", df$economie_cum),
       check.names = FALSE
     )
@@ -364,116 +362,23 @@ server <- function(input, output, session) {
   #  TAB 2 — COMPARARE STRATEGII (PLĂȚI ÎN LEI LA CURS BNR)
   # ============================================================
   calc_tab2 <- reactive({
-    df_full <- date_curs_ajustat()
-    durata  <- input$durata
-    df      <- trunca(df_full, durata)
-    req(nrow(df) > 0)
-
-    chirie   <- req(input$chirie_eur)
-    n        <- input$c2_n
-    fara_pl  <- isTRUE(input$fara_plafon)
-    pl       <- if (fara_pl) Inf else input$plafon
-    avans_l  <- input$c2_avans_luni
-    rest_pct <- input$c2_restituire_pct / 100
-
-    luni      <- seq_len(nrow(df))
-    curs      <- df$eur_ron
-    curs_baza <- curs[1]
-
-    # Curs plafonat
-    curs_ap <- pmin(curs, pl)
-
-    # Garanție / Avans inițial (plătit la cursul primei luni)
-    avans_ron       <- avans_l * chirie * pmin(curs[1], pl)
-    avans_restituit <- avans_ron * rest_pct
-    avans_net       <- avans_ron - avans_restituit
-
-    # ---- 1. Lunar fără plafon ----
-    s1_plati <- chirie * curs
-
-    # ---- 2. Lunar cu plafon ----
-    s2_plati <- chirie * curs_ap
-
-    # ---- 3. Blocuri n luni fără plafon ----
-    # La începutul fiecărui bloc de n luni, plătești n luni chirie în RON la cursul BNR din acea lună
-    s3_plati <- numeric(length(luni))
-    s3_curs_bloc <- numeric(length(luni))
-    bloc_start <- seq(1, length(luni), by = n)
-    for (bs in bloc_start) {
-      be  <- min(bs + n - 1, length(luni))
-      # cursul blocat pentru lunile din acest interval este cursul lunii bs
-      s3_curs_bloc[bs:be] <- curs[bs]
-      s3_plati[bs:be]     <- chirie * curs[bs]
-    }
-
-    # ---- 4. Blocuri n luni cu plafon ----
-    s4_plati <- numeric(length(luni))
-    s4_curs_bloc <- numeric(length(luni))
-    for (bs in bloc_start) {
-      be  <- min(bs + n - 1, length(luni))
-      s4_curs_bloc[bs:be] <- pmin(curs[bs], pl)
-      s4_plati[bs:be]     <- chirie * pmin(curs[bs], pl)
-    }
-
-    # Cât s-ar fi plătit dacă leul rămânea neschimbat la cursul lunii 1 (bază)
-    plata_baza_luna <- chirie * curs_baza
-
-    # Pierderi / Bani în plus plătiți exclusiv din deprecierea leului:
-    p1_luna <- pmax(s1_plati - plata_baza_luna, 0)
-    p2_luna <- pmax(s2_plati - plata_baza_luna, 0)
-    p3_luna <- pmax(s3_plati - plata_baza_luna, 0)
-    p4_luna <- pmax(s4_plati - plata_baza_luna, 0)
-
-    # Economii realizate față de plata de bază (Strategia 1: Lunar fără plafon)
-    # Cât economisești dacă folosești fiecare dintre opțiuni:
-    ec_s2 <- cumsum(pmax(s1_plati - s2_plati, 0)) # din plafon
-    ec_s3 <- cumsum(pmax(s1_plati - s3_plati, 0)) # din blocuri n luni (plată anticipată)
-    ec_s4 <- cumsum(pmax(s1_plati - s4_plati, 0)) # din blocuri + plafon
-
-    # Indicatori plafon atins
-    loveste_plafon <- !fara_pl & (curs >= pl)
-
-    list(
-      luni            = luni,
-      months          = df$month,
-      curs            = curs,
-      curs_baza       = curs_baza,
-      fara_pl         = fara_pl,
-      pl              = pl,
-      n               = n,
-      loveste_plafon  = loveste_plafon,
-      # Plăți lunare
-      s1_luna         = s1_plati,
-      s2_luna         = s2_plati,
-      s3_luna         = s3_plati,
-      s4_luna         = s4_plati,
-      # Total cumulat efectiv plătit
-      s1_cum          = cumsum(s1_plati),
-      s2_cum          = cumsum(s2_plati),
-      s3_cum          = cumsum(s3_plati),
-      s4_cum          = cumsum(s4_plati),
-      # Bani plătiți în plus din depreciere (cumulat)
-      p1_cum          = cumsum(p1_luna),
-      p2_cum          = cumsum(p2_luna),
-      p3_cum          = cumsum(p3_luna),
-      p4_cum          = cumsum(p4_luna),
-      # Economii cumulate vs Strategia 1
-      ec_s2           = ec_s2,
-      ec_s3           = ec_s3,
-      ec_s4           = ec_s4,
-      # Garanție / Avans
-      avans_ron       = avans_ron,
-      avans_restituit = avans_restituit,
-      avans_net       = avans_net
-    )
+    p <- parametri()
+    validate(need(length(input$c2_n) == 1 && is.finite(input$c2_n) &&
+                    input$c2_n >= 1 && input$c2_n <= 12 && input$c2_n == floor(input$c2_n),
+                  "Numărul de luni în avans trebuie să fie întreg, între 1 și 12."),
+             need(length(input$c2_avans_luni) == 1 && is.finite(input$c2_avans_luni) &&
+                    input$c2_avans_luni >= 0 && input$c2_avans_luni <= 6 &&
+                    input$c2_avans_luni == floor(input$c2_avans_luni), "Garanția trebuie să fie între 0 și 6 luni întregi."),
+             need(length(input$c2_restituire_pct) == 1 && is.finite(input$c2_restituire_pct) &&
+                    input$c2_restituire_pct >= 0 && input$c2_restituire_pct <= 100,
+                  "Restituirea trebuie să fie între 0 și 100%."))
+    calculate_strategies(trunca(date_curs_ajustat(), input$durata), p$chirie,
+                         p$pl, input$c2_n, input$c2_avans_luni,
+                         input$c2_restituire_pct / 100)
   })
 
   output$c2_big_number_ui <- renderUI({
     r <- calc_tab2()
-
-    total_s1 <- tail(r$s1_cum, 1)
-    total_s3 <- tail(r$s3_cum, 1)
-    total_s4 <- tail(r$s4_cum, 1)
 
     pierdere_s1 <- round(tail(r$p1_cum, 1), 2)
     pierdere_s3 <- round(tail(r$p3_cum, 1), 2)
@@ -489,10 +394,10 @@ server <- function(input, output, session) {
         div(
           style = "flex: 1; min-width: 240px; background: #fff3f3; border: 1px solid #f5c6cb; border-radius: 8px; padding: 14px; text-align: center;",
           div(style = "font-size: 13px; color: #721c24; font-weight: 600; text-transform: uppercase;",
-              "Pierdere din depreciere (plată lunară fără plafon)"),
+              "Diferență față de luna 1 (lunar fără plafon)"),
           div(style = "font-size: 26px; font-weight: 800; color: #dc3545; margin: 4px 0;",
-              paste0("+", format(pierdere_s1, big.mark = ".", decimal.mark = ","), " lei")),
-          div(style = "font-size: 12px; color: #842029;", "plătiți în plus doar din creșterea cursului EUR/RON")
+              paste0(format(pierdere_s1, big.mark = ".", decimal.mark = ","), " lei")),
+          div(style = "font-size: 12px; color: #842029;", "Pozitiv = cost suplimentar; negativ = economie")
         ),
         div(
           style = "flex: 1; min-width: 240px; background: #f0f7ff; border: 1px solid #b6d4fe; border-radius: 8px; padding: 14px; text-align: center;",
@@ -501,7 +406,7 @@ server <- function(input, output, session) {
           div(style = "font-size: 26px; font-weight: 800; color: #0d6efd; margin: 4px 0;",
               paste0(format(ec_avans, big.mark = ".", decimal.mark = ","), " lei")),
           div(style = "font-size: 12px; color: #084298;",
-              paste0("Reduci pierderea la +", pierdere_s3, " lei trimițând la BNR în avans"))
+              paste0("Diferență față de luna 1: ", pierdere_s3, " lei. Economie negativă = cost în plus."))
         ),
         if (!r$fara_pl) {
           div(
@@ -511,7 +416,7 @@ server <- function(input, output, session) {
             div(style = "font-size: 26px; font-weight: 800; color: #117a65; margin: 4px 0;",
                 paste0(format(ec_av_plaf, big.mark = ".", decimal.mark = ","), " lei")),
             div(style = "font-size: 12px; color: #117a65;",
-                paste0("Pierdere rămasă: doar +", pierdere_s4, " lei | Plafon atins în ", luni_plaf, " luni"))
+                paste0("Diferență față de luna 1: ", pierdere_s4, " lei | Plafon aplicat blocurilor pentru ", luni_plaf, " luni"))
           )
         }
       )
@@ -531,10 +436,10 @@ server <- function(input, output, session) {
     df_plot <- data.frame(
       idx   = rep(r$luni, 3),
       val   = c(r$p1_cum, r$p3_cum, r$ec_s3),
-      tip   = rep(c("Pierdere (bani în plus)", "Pierdere (bani în plus)", "Bani economisiți"), each = length(r$luni)),
+      tip   = rep(c("Diferență vs luna 1", "Diferență vs luna 1", "Bani economisiți"), each = length(r$luni)),
       strat = rep(c(
-        "❌ Pierdere: Lunar (fără plafon)",
-        paste0("⚠️ Pierdere rămasă: Blocuri ", r$n, " luni (avans BNR)"),
+        "Diferență: Lunar (fără plafon)",
+        paste0("⚠️ Diferență vs luna 1: Blocuri ", r$n, " luni (avans BNR)"),
         paste0("✅ Economie realizată prin plata în avans pe ", r$n, " luni")
       ), each = length(r$luni))
     )
@@ -543,9 +448,9 @@ server <- function(input, output, session) {
       df_plafon <- data.frame(
         idx   = rep(r$luni, 2),
         val   = c(r$p4_cum, r$ec_s4),
-        tip   = rep(c("Pierdere (bani în plus)", "Bani economisiți"), each = length(r$luni)),
+        tip   = rep(c("Diferență vs luna 1", "Bani economisiți"), each = length(r$luni)),
         strat = rep(c(
-          paste0("🛡️ Pierdere rămasă: Blocuri ", r$n, " luni + Plafon ", r$pl),
+          paste0("🛡️ Diferență vs luna 1: Blocuri ", r$n, " luni + Plafon ", r$pl),
           paste0("✨ Economie totală: Blocuri ", r$n, " luni + Plafon ", r$pl)
         ), each = length(r$luni))
       )
@@ -557,16 +462,16 @@ server <- function(input, output, session) {
       geom_point(size = 2.4) +
       scale_linetype_manual(
         name = "Tip indicator",
-        values = c("Pierdere (bani în plus)" = "solid", "Bani economisiți" = "dashed")
+        values = c("Diferență vs luna 1" = "solid", "Bani economisiți" = "dashed")
       ) +
       scale_color_brewer(palette = "Set1", name = "Strategie & Impact") +
       labs(
-        title = "Grafic Suprapus: Bani pierduți din depreciere vs. Economii realizate (RON)",
+        title = "Diferențe față de luna 1 și economii față de plata lunară (RON)",
         subtitle = paste0(
-          "Curs BNR pornire: ", sprintf("%.4f", r$curs_baza),
+          "Curs din CSV la pornire: ", sprintf("%.4f", r$curs_baza),
           " RON/EUR | Chirie: ", input$chirie_eur, " EUR/lună | Plată directă în RON la curs BNR"
         ),
-        x = "Luna", y = "RON (față de cursul lunii 1)"
+        x = "Luna", y = "RON (economie negativă = cost suplimentar)"
       )
 
     # Marcaje când lovește plafonul
@@ -590,13 +495,6 @@ server <- function(input, output, session) {
 
   output$tabel_comparare <- renderTable({
     r   <- calc_tab2()
-    nl  <- length(r$luni)
-
-    nota_avans <- paste0(
-      "Garanție inițială: ", round(r$avans_ron, 2), " lei | ",
-      "Recuperat (", input$c2_restituire_pct, "%): ", round(r$avans_restituit, 2), " lei | ",
-      "Cost net garanție: ", round(r$avans_net, 2), " lei"
-    )
 
     tabel_df <- data.frame(
       Strategie = c(
@@ -609,14 +507,20 @@ server <- function(input, output, session) {
         tail(r$s1_cum, 1), tail(r$s2_cum, 1),
         tail(r$s3_cum, 1), tail(r$s4_cum, 1)
       ), 2),
-      `Din care bani pierduți (depreciere)` = round(c(
+      `Diferență vs cursul lunii 1` = round(c(
         tail(r$p1_cum, 1), tail(r$p2_cum, 1),
         tail(r$p3_cum, 1), tail(r$p4_cum, 1)
       ), 2),
-      `Economie vs Lunar fără plafon` = round(c(
+      `Economie chirie vs Lunar fără plafon` = round(c(
         0, tail(r$ec_s2, 1),
         tail(r$ec_s3, 1), tail(r$ec_s4, 1)
       ), 2),
+      `Garanție inițială` = round(r$avans_ron, 2),
+      `Garanție recuperată` = round(r$avans_restituit, 2),
+      `Cost net garanție` = round(r$avans_net, 2),
+      `Economie netă inclusiv garanție` = round(c(
+        0, tail(r$ec_s2, 1), tail(r$ec_s3, 1), tail(r$ec_s4, 1)
+      ) + r$avans_net[1] - r$avans_net, 2),
       `Cost net final (+ Garanție netă)` = round(c(
         tail(r$s1_cum, 1), tail(r$s2_cum, 1),
         tail(r$s3_cum, 1), tail(r$s4_cum, 1)
