@@ -65,9 +65,9 @@ check(read_rates(csv)$month, c("2026-09", "2026-10"))
 unlink(csv)
 # UI and reactive integration: start month, upload errors, rendered summaries.
 check(month_input()$children[[2]]$attribs[["data-date-min-view-mode"]], "months")
-check(month_input()$children[[2]]$attribs[["data-initial-date"]], format(Sys.Date(), "%Y-%m-01"))
+check(month_input()$children[[2]]$attribs[["data-initial-date"]], format(bucharest_today(), "%Y-%m-01"))
 shiny::testServer(server, {
-  session$setInputs(luna_start = as.Date("2026-10-01"), durata = 3, chirie_eur = 500,
+  session$setInputs(sursa_date = "local", luna_start = as.Date("2026-10-01"), durata = 3, chirie_eur = 500,
                    fara_plafon = FALSE, plafon = 5.3, c2_n = 2, c2_avans_luni = 1,
                    c2_restituire_pct = 100, mod_vedere_tab1 = "pierdere")
   check(calc_tab1()$month, c("2026-10", "2026-11", "2026-12"))
@@ -83,7 +83,7 @@ shiny::testServer(server, {
   check(inherits(tryCatch(date_curs_ajustat(), error = identity), "shiny.silent.error"), TRUE)
   invalid_csv <- tempfile(fileext = ".csv")
   writeLines("bad,headers\nx,y", invalid_csv)
-  session$setInputs(csv_upload = list(datapath = invalid_csv))
+  session$setInputs(sursa_date = "csv", csv_upload = list(datapath = invalid_csv))
   check(inherits(tryCatch(date_curs(), error = identity), "shiny.silent.error"), TRUE)
   unlink(invalid_csv)
   uploaded_csv <- tempfile(fileext = ".csv")
@@ -98,7 +98,8 @@ shiny::testServer(server, {
   session$setInputs(mod_vedere_tab1 = "economie")
   check(grepl("dezactivat", output$big_number_ui$html), TRUE)
   unlink(uploaded_csv)
-  session$setInputs(csv_upload = NULL, luna_start = as.Date("2026-09-01"), chirie_eur = -500)
+  session$setInputs(sursa_date = "local", csv_upload = NULL, luna_start = as.Date("2026-09-01"), chirie_eur = -500)
   check(inherits(tryCatch(calc_tab1(), error = identity), "shiny.silent.error"), TRUE)
 })
+source("tests/sources.R")
 cat(sprintf("Passed %d calculation, CSV and Shiny integration checks.\n", checks))

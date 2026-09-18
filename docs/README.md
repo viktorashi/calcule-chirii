@@ -18,7 +18,7 @@ Posibilitatea plății în avans cu N luni (pentru a amortiza deprecierea)
 
 Am pus-o pe Sonnetă să facă programu ăsta, care momentan se ruleaza doar local din R, dar poate îl hostez mai încolo pe undeva să vă fie mai ușor.
 
-Folosește seria EUR/RON din `date_curs.csv`, etichetată în proiect ca prognoză Gov Capital. Nu sunt cursuri BNR observate și proveniența valorilor nu este verificată de aplicație. Poți încărca propria serie CSV.
+Implicit folosește ultimul curs EUR/RON publicat de BNR și prognozele trimestriale ING, preluate automat și păstrate în cache. Poți selecta și un CSV propriu sau seria statică existentă în proiect.
 
 Screenshoturile arată economii simulate, condiționate de cursurile din CSV și de clauzele acceptate de proprietar.
 
@@ -33,12 +33,12 @@ Nu am explitat tot ce-i pe-acolo dar ar trebui să fie (sper) self-explanatory.
 ## Cerințe
 
 - R (≥ 4.0)
-- Pachete: `shiny`, `ggplot2`, `dplyr`, `scales`, `bslib`
+- Pachete: `shiny`, `ggplot2`, `dplyr`, `scales`, `bslib`, `xml2`
 
 ## Instalare pachete (o singură dată)
 
 ```r
-install.packages(c("shiny", "ggplot2", "dplyr", "scales", "bslib"),
+install.packages(c("shiny", "ggplot2", "dplyr", "scales", "bslib", "xml2"),
                  repos = "https://cloud.r-project.org")
 ```
 
@@ -63,18 +63,35 @@ Deschide în browser: **<http://127.0.0.1:7474**>
 |---|---|
 | `app.R` | Interfața și serverul Shiny |
 | `R/model.R` | Validarea CSV și formulele |
-| `tests/run.R` | Verificări de calcul și integrare Shiny |
-| `date_curs.csv` | Prognozele EUR/RON (Gov Capital, 10 sept 2026) |
+| `R/sources.R` | Surse BNR/ING, cache și estimarea cursurilor între repere |
+| `tests/run.R`, `tests/sources.R` | Verificări de calcul, surse, cache și integrare Shiny |
+| `date_curs.csv` | Scenariul static anterior, disponibil în modul offline |
 | `README.md` | Acest fișier |
 
-## Date curs
+## Date live și prognoze
 
-- Sursa: [Gov Capital EUR/RON](https://gov.capital/forex-forecast/eur-ron/), coloana „Forecast close"
-- Consultate: 10 septembrie 2026
-- Acoperire: sept 2026 – aug 2029 (36 luni)
-- **Nu sunt prognozele BNR** și nu sunt demonstrate a fi cele mai precise.
-- Valorile sunt de **sfârșit de lună** — folosite ca curs la scadență este doar o aproximație.
-- Simularea se limitează la lunile din dataset; nu se extrapolează în tăcere.
+- **BNR:** [fluxul XML oficial](https://curs.bnr.ro/nbrfxrates.xml), fără cheie API. Se folosește ultimul curs EUR/RON publicat, nu media lunii. Data publicării este afișată; în weekend sau înainte de publicarea zilnică poate fi o zi anterioară.
+- **ING:** [tabelul public de prognoze FX](https://think.ing.com/forecasts/), preluat din HTML. Integrarea citește EUR/RON și antetele trimestriale din secțiunea FX; nu presupune existența unui API public ING. O modificare incompatibilă a paginii produce o eroare explicită și, dacă există, folosirea cache-ului valid.
+- ING publică repere de **sfârșit de trimestru**, nu cursuri BNR viitoare și nici o prognoză pentru fiecare lună. Aplicația estimează liniar, în funcție de numărul de zile, între cursul BNR disponibil azi și aceste repere. Aceste valori sunt etichetate separat în tabel.
+- Luna curentă înseamnă că șederea începe **azi**, în fusul `Europe/Bucharest`. Ratele următoare sunt estimate în aceeași zi a fiecărei luni, limitată la ultima zi a lunii când este necesar (31 ianuarie → 28/29 februarie → 31 martie). O lună viitoare selectată înseamnă începere în ziua 1.
+- Durata maximă este dată de ultimul reper ING. Nu se extrapolează după el și nu se completează automat cu CSV-ul vechi. Pentru un scenariu mai lung, selectează CSV propriu.
+- La verificarea din 17 septembrie 2026, pagina ING acoperea până la 31 decembrie 2027. Orizontul este citit din sursă, nu fixat în cod.
+- O actualizare a prognozei poate schimba economiile în ambele sensuri; datele mai recente nu garantează o predicție mai precisă.
+
+### Cache și actualizare
+
+- Cache persistent în `tools::R_user_dir("calcule-chirii", "cache")`, în afara repository-ului; se reutilizează între sesiuni și reporniri.
+- BNR: valabil o oră; ING: 24 de ore. Cu aplicația deschisă, expirarea se verifică la fiecare 5 minute. Schimbarea chiriei sau duratei nu declanșează descărcări noi.
+- **Actualizează acum** ocolește termenul cache-ului și reîncarcă ambele surse.
+- Se salvează numai răspunsurile validate, împreună cu URL-ul și momentul preluării. Un răspuns invalid nu suprascrie copia bună.
+- Dacă actualizarea eșuează, o copie BNR de maximum 7 zile sau ING de maximum 30 de zile poate fi folosită, cu mesaj vizibil. În plus, cursul BNR trebuie să aibă o dată de publicare de cel mult 7 zile. Fără o copie acceptabilă, calculele live afișează eroarea; modurile CSV rămân disponibile.
+- Interfața afișează separat data publicării BNR, eticheta de actualizare ING și ora ultimei preluări reușite. Verificarea paginii nu înseamnă că ING și-a revizuit prognoza.
+
+### CSV
+
+- Alege **CSV propriu** și încarcă `month,eur_ron` sau **CSV existent (offline)**.
+- Seria existentă acoperă septembrie 2026 – august 2029. Documentația anterioară atribuia contradictoriu datele unor surse diferite; proveniența ei rămâne neverificată. Este un scenariu static, fără actualizare automată.
+- În modurile CSV, și prima lună folosește exact cursul din fișier, fără înlocuire BNR.
 
 ## Excluderi explicite din model
 
@@ -89,7 +106,7 @@ Deschide în browser: **<http://127.0.0.1:7474**>
 
 ## Luna de început și interpretarea rezultatelor
 
-- Selectorul afișează luni și ani, cu luna curentă implicită. Cursul inițial vine din rândul corespunzător din CSV, iar simularea începe acolo.
+- Selectorul afișează luni și ani, cu luna curentă implicită. Modul live folosește convenția de început de mai sus; modurile CSV folosesc rândul lunii alese.
 - Durata se limitează la lunile rămase. CSV-ul trebuie să aibă luni consecutive și unice în format `AAAA-LL`, cu cursuri finite și strict pozitive; fișierele invalide afișează o eroare.
 - Diferența față de luna 1 este **semnată**: costul chiriei minus costul la cursul inițial constant. Scăderile cursului compensează creșterile.
 - Economia unei strategii este chiria lunară fără plafon minus chiria acelei strategii. O economie negativă înseamnă că strategia costă mai mult.
@@ -101,4 +118,11 @@ Deschide în browser: **<http://127.0.0.1:7474**>
 
 Din directorul proiectului: `Rscript tests/run.R`.
 Verificările acoperă cursuri crescătoare, descrescătoare și oscilante, plafon,
-plată în avans, bloc final incomplet, garanții, CSV-uri invalide și selectarea lunii în Shiny.
+plată în avans, bloc final incomplet, garanții, CSV-uri invalide, selectarea lunii,
+parsarea surselor, expirarea cache-ului, erorile de rețea și interpolarea. Testele sunt offline.
+
+Verificarea manuală a surselor reale (necesită internet):
+
+```bash
+Rscript -e 'source("R/sources.R"); s <- load_live_sources(force=TRUE); print(build_live_rates(s, bucharest_today()))'
+```

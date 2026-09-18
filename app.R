@@ -1,7 +1,7 @@
 # ============================================================
 #  app.R  — Simulator negociere chirie EUR→RON
 #  Chirie: 500 EUR/lună, plătită în RON la cursul BNR
-#  Sursa prognozelor: Gov Capital (Forecast close, 10 sept 2026)
+#  Date live: BNR + repere trimestriale ING; alternativ CSV local
 # ============================================================
 # Excluderi explicite din model:
 #   - Dobânzi / randament pe sumele deținute
@@ -19,10 +19,11 @@ library(bslib)
 # ---- date implicite ----------------------------------------
 DEFAULT_CSV <- "date_curs.csv"
 source("R/model.R")
+source("R/sources.R")
 
 month_input <- function() {
   picker <- dateInput("luna_start", "Prima lună de chirie",
-                      value = format(Sys.Date(), "%Y-%m-01"),
+                      value = format(bucharest_today(), "%Y-%m-01"),
                       format = "mm/yyyy", startview = "year", language = "ro")
   picker$children[[2]]$attribs[["data-date-min-view-mode"]] <- "months"
   picker
@@ -38,7 +39,7 @@ ui <- page_navbar(
     h4("⚙️ Parametri Generali"),
     numericInput("chirie_eur", "Chirie lunară (EUR)",
                  value = 500, min = 50, max = 5000, step = 25),
-    month_input(),
+    uiOutput("month_picker"),
     textOutput("curs_selectat"),
     sliderInput("durata", "Durata șederii (luni)",
                 min = 1, max = 36, value = 36, step = 1),
@@ -52,9 +53,21 @@ ui <- page_navbar(
     ),
     hr(),
     h5("Date curs EUR/RON"),
-    fileInput("csv_upload", "Încarcă CSV propriu curs", accept = ".csv"),
-    helpText("CSV: month (AAAA-LL), eur_ron. Datele implicite sunt prognoze 2026–2029, nu cursuri BNR observate."),
-    helpText("Rezultatele sunt estimări pe baza CSV-ului selectat.")
+    selectInput("sursa_date", "Sursa datelor", choices = c(
+      "BNR live + prognoze ING" = "live", "CSV propriu" = "csv",
+      "CSV existent (offline)" = "local"), selected = "live"),
+    conditionalPanel("input.sursa_date === 'live'",
+      actionButton("refresh_data", "Actualizează acum"),
+      uiOutput("source_status"),
+      helpText("Luna curentă = chiria începe azi. Într-o lună viitoare, începe în ziua 1. Cursurile viitoare sunt estimate între reperele trimestriale ING; durata este limitată la orizontul disponibil.")
+    ),
+    conditionalPanel("input.sursa_date === 'csv'",
+      fileInput("csv_upload", "Încarcă CSV propriu curs", accept = ".csv")
+    ),
+    conditionalPanel("input.sursa_date !== 'live'",
+      helpText("CSV: month (AAAA-LL), eur_ron. CSV-ul existent este un scenariu static, cu proveniență neverificată.")
+    ),
+    helpText("Cursurile viitoare și economiile sunt estimări, nu garanții.")
   ),
   nav_spacer(),
 
@@ -84,7 +97,7 @@ ui <- page_navbar(
       ),
       fluidRow(
         column(12,
-          tableOutput("tabel_simplu")
+          div(style = "overflow-x: auto;", tableOutput("tabel_simplu"))
         )
       )
     )
@@ -146,8 +159,29 @@ ui <- page_navbar(
 # ---- SERVER ------------------------------------------------
 server <- function(input, output, session) {
 
+  output$month_picker <- renderUI(month_input())
+  last_refresh <- 0L
+  live_sources <- reactive({
+    req(identical(input$sursa_date, "live"))
+    invalidateLater(5 * 60 * 1000, session)
+    refresh <- input$refresh_data %||% 0L
+    force <- refresh != last_refresh
+    last_refresh <<- refresh
+    tryCatch(load_live_sources(force = force), error = function(e) {
+      validate(need(FALSE, conditionMessage(e)))
+    })
+  })
+
   date_curs <- reactive({
-    path <- if (is.null(input$csv_upload)) DEFAULT_CSV else input$csv_upload$datapath
+    req(input$sursa_date)
+    if (identical(input$sursa_date, "live")) {
+      return(tryCatch(build_live_rates(live_sources(), bucharest_today()),
+                      error = function(e) validate(need(FALSE, conditionMessage(e)))))
+    }
+    if (identical(input$sursa_date, "csv")) {
+      validate(need(!is.null(input$csv_upload), "Încarcă un CSV pentru această sursă."))
+    }
+    path <- if (identical(input$sursa_date, "csv")) input$csv_upload$datapath else DEFAULT_CSV
     tryCatch(read_rates(path), error = function(e) {
       validate(need(FALSE, conditionMessage(e)))
     })
@@ -163,6 +197,10 @@ server <- function(input, output, session) {
   date_curs_ajustat <- reactive({
     validate(need(length(input$luna_start) == 1 && !is.na(input$luna_start),
                   "Alege o lună disponibilă din calendar."))
+    if (identical(input$sursa_date, "live")) {
+      return(tryCatch(build_live_rates(live_sources(), input$luna_start),
+                      error = function(e) validate(need(FALSE, conditionMessage(e)))))
+    }
     df <- date_curs()
     month <- format(as.Date(input$luna_start), "%Y-%m")
     validate(need(month %in% df$month,
@@ -180,8 +218,26 @@ server <- function(input, output, session) {
 
   output$curs_selectat <- renderText({
     df <- date_curs_ajustat()
-    paste0("Curs din CSV: ", sprintf("%.4f", df$eur_ron[1]),
+    label <- if (identical(input$sursa_date, "live")) {
+      paste0(df$rate_type[1], " pentru ", format(df$payment_date[1], "%d.%m.%Y"), ": ")
+    } else "Curs din CSV: "
+    paste0(label, sprintf("%.4f", df$eur_ron[1]),
            " RON/EUR · ", nrow(df), " luni disponibile")
+  })
+
+  output$source_status <- renderUI({
+    s <- live_sources()
+    stamp <- function(x) format(x$fetched_at, "%d.%m.%Y %H:%M", tz = "Europe/Bucharest")
+    tagList(
+      p(tags$a("BNR", href = BNR_URL, target = "_blank"), ": ",
+        sprintf("%.4f", s$bnr$data$eur_ron), " RON/EUR, publicat ",
+        format(s$bnr$data$date, "%d.%m.%Y"), ". Verificat: ", stamp(s$bnr)),
+      p(tags$a("ING", href = ING_URL, target = "_blank"), ": ", s$ing$data$published_label,
+        ". Verificat: ", stamp(s$ing), ". Repere până la ",
+        format(max(s$ing$data$points$date), "%d.%m.%Y"), "."),
+      if (!is.null(s$bnr$notice)) div(class = "alert alert-warning", s$bnr$notice),
+      if (!is.null(s$ing$notice)) div(class = "alert alert-warning", s$ing$notice)
+    )
   })
 
   parametri <- reactive({
@@ -345,9 +401,9 @@ server <- function(input, output, session) {
     fara_pl <- isTRUE(input$fara_plafon)
     pl      <- if (fara_pl) Inf else input$plafon
     
-    data.frame(
+    table <- data.frame(
       Luna                    = df$month,
-      `Curs prog.`            = sprintf("%.4f", df$eur_ron),
+      `Curs de referință`            = sprintf("%.4f", df$eur_ron),
       `Curs aplic.`           = sprintf("%.4f", df$curs_aplicat),
       `Plafon activ?`         = ifelse(df$loveste_plafon, "⚡ DA", "nu"),
       `Plată fără plafon`     = sprintf("%.2f lei", df$plata_fara),
@@ -356,6 +412,11 @@ server <- function(input, output, session) {
       `Economie plafon cum.`  = sprintf("%.2f lei", df$economie_cum),
       check.names = FALSE
     )
+    if ("payment_date" %in% names(df)) {
+      table <- cbind(data.frame(`Data plății` = format(df$payment_date, "%d.%m.%Y"),
+                               `Tip curs` = df$rate_type, check.names = FALSE), table)
+    }
+    table
   }, striped = TRUE, hover = TRUE, spacing = "s", align = "r")
 
   # ============================================================
@@ -468,7 +529,7 @@ server <- function(input, output, session) {
       labs(
         title = "Diferențe față de luna 1 și economii față de plata lunară (RON)",
         subtitle = paste0(
-          "Curs din CSV la pornire: ", sprintf("%.4f", r$curs_baza),
+          "Curs la pornire: ", sprintf("%.4f", r$curs_baza),
           " RON/EUR | Chirie: ", input$chirie_eur, " EUR/lună | Plată directă în RON la curs BNR"
         ),
         x = "Luna", y = "RON (economie negativă = cost suplimentar)"
