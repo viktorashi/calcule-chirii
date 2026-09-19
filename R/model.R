@@ -116,6 +116,9 @@ calculate_strategies <- function(df, chirie, pl = Inf, n = 3, avans_l = 1, rest_
       pl              = pl,
       n               = n,
       loveste_plafon  = loveste_plafon,
+      is_forecast     = if (!is.null(df$is_forecast)) df$is_forecast else rep(FALSE, length(luni)),
+      rate_type       = if (!is.null(df$rate_type)) df$rate_type else rep("Nespecificat", length(luni)),
+      payment_date    = if (!is.null(df$payment_date)) df$payment_date else as.Date(paste0(df$month, "-01")),
       # Plăți lunare
       s1_luna         = s1_plati,
       s2_luna         = s2_plati,

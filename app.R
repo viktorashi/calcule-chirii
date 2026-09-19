@@ -59,7 +59,7 @@ ui <- page_navbar(
     conditionalPanel("input.sursa_date === 'live'",
       actionButton("refresh_data", "Actualizează acum"),
       uiOutput("source_status"),
-      helpText("Luna curentă = chiria începe azi. Într-o lună viitoare, începe în ziua 1. Cursurile viitoare sunt estimate între reperele trimestriale ING; durata este limitată la orizontul disponibil.")
+      helpText("Mod live: poți alege orice lună de pornire (istoric oficial BNR din 2018 până în prezent, sau pornire în viitor cu prognoze ING). Cursurile viitoare sunt estimate între reperele trimestriale ING.")
     ),
     conditionalPanel("input.sursa_date === 'csv'",
       fileInput("csv_upload", "Încarcă CSV propriu curs", accept = ".csv")
@@ -175,14 +175,23 @@ server <- function(input, output, session) {
   date_curs <- reactive({
     req(input$sursa_date)
     if (identical(input$sursa_date, "live")) {
-      return(tryCatch(build_live_rates(live_sources(), bucharest_today()),
+      return(tryCatch(build_live_timeline(live_sources(), bucharest_today()),
                       error = function(e) validate(need(FALSE, conditionMessage(e)))))
     }
     if (identical(input$sursa_date, "csv")) {
       validate(need(!is.null(input$csv_upload), "Încarcă un CSV pentru această sursă."))
     }
     path <- if (identical(input$sursa_date, "csv")) input$csv_upload$datapath else DEFAULT_CSV
-    tryCatch(read_rates(path), error = function(e) {
+    tryCatch({
+      df <- read_rates(path)
+      cur_m <- format(bucharest_today(), "%Y-%m")
+      if (!("payment_date" %in% names(df))) df$payment_date <- as.Date(paste0(df$month, "-01"))
+      if (!("is_forecast" %in% names(df))) df$is_forecast <- df$month > cur_m
+      if (!("rate_type" %in% names(df))) {
+        df$rate_type <- ifelse(df$is_forecast, "CSV (scenariu viitor)", "CSV (istoric)")
+      }
+      df
+    }, error = function(e) {
       validate(need(FALSE, conditionMessage(e)))
     })
   })
@@ -228,6 +237,7 @@ server <- function(input, output, session) {
   output$source_status <- renderUI({
     s <- live_sources()
     stamp <- function(x) format(x$fetched_at, "%d.%m.%Y %H:%M", tz = "Europe/Bucharest")
+    hist_min <- if (!is.null(s$history) && nrow(s$history) > 0) min(s$history$month) else "2018-01"
     tagList(
       p(tags$a("BNR", href = BNR_URL, target = "_blank"), ": ",
         sprintf("%.4f", s$bnr$data$eur_ron), " RON/EUR, publicat ",
@@ -235,6 +245,7 @@ server <- function(input, output, session) {
       p(tags$a("ING", href = ING_URL, target = "_blank"), ": ", s$ing$data$published_label,
         ". Verificat: ", stamp(s$ing), ". Repere până la ",
         format(max(s$ing$data$points$date), "%d.%m.%Y"), "."),
+      p("🏛️ ", tags$b("Date istorice:"), " Cursuri lunare oficiale BNR disponibile din ", hist_min, " până în prezent."),
       if (!is.null(s$bnr$notice)) div(class = "alert alert-warning", s$bnr$notice),
       if (!is.null(s$ing$notice)) div(class = "alert alert-warning", s$ing$notice)
     )
@@ -271,10 +282,24 @@ server <- function(input, output, session) {
     economie_totala      <- round(tail(df$economie_cum, 1), 2)
     luni_plafonate       <- sum(df$loveste_plafon)
     
+    n_past <- sum(!df$is_forecast)
+    n_fut  <- sum(df$is_forecast)
+    period_pill <- if (n_fut == 0) {
+      span(class = "badge bg-success", style = "font-size: 0.85em; padding: 6px 14px; border-radius: 20px;",
+           paste0("🏛️ Toate cele ", luni, " luni sunt date istorice reale BNR"))
+    } else if (n_past == 0) {
+      span(class = "badge bg-warning text-dark", style = "font-size: 0.85em; padding: 6px 14px; border-radius: 20px;",
+           paste0("🔮 Toate cele ", luni, " luni sunt prognoze / estimări viitoare"))
+    } else {
+      span(class = "badge bg-info text-dark", style = "font-size: 0.85em; padding: 6px 14px; border-radius: 20px;",
+           paste0("⚖️ Perioadă mixtă: ", n_past, " luni istorice reale (BNR) + ", n_fut, " luni prognoză viitoare (ING)"))
+    }
+
     if (mod == "pierdere") {
       if (fara_pl) {
         div(
           style = "text-align:center; padding:18px;",
+          div(style = "margin-bottom: 10px;", period_pill),
           h2(style = "color:#c0392b; font-size:2.3em;",
              paste0("Diferență netă: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#7f8c8d;",
@@ -283,6 +308,7 @@ server <- function(input, output, session) {
       } else {
         div(
           style = "text-align:center; padding:18px;",
+          div(style = "margin-bottom: 10px;", period_pill),
           h2(style = "color:#d35400; font-size:2.2em;",
              paste0("Fără plafon, diferență netă: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#27ae60; font-weight:600;",
@@ -295,6 +321,7 @@ server <- function(input, output, session) {
       if (fara_pl || economie_totala == 0) {
         div(
           style = "text-align:center; padding:18px;",
+          div(style = "margin-bottom: 10px;", period_pill),
           h3(style = "color:#e67e22;",
              if (fara_pl) "Plafonul este dezactivat (∞). Nu există economie de plafonare."
              else paste0("Plafonul de ", pl, " RON/EUR nu generează economii în cele ", luni, " luni.")),
@@ -303,6 +330,7 @@ server <- function(input, output, session) {
       } else {
         div(
           style = "text-align:center; padding:18px;",
+          div(style = "margin-bottom: 10px;", period_pill),
           h2(style = "color:#27ae60; font-size:2.4em;",
              paste0("Economisești în total ", format(economie_totala, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#2c3e50;",
@@ -317,8 +345,24 @@ server <- function(input, output, session) {
     fara_pl <- isTRUE(input$fara_plafon)
     pl      <- if (fara_pl) Inf else input$plafon
     mod     <- input$mod_vedere_tab1
+
+    has_fc   <- any(df$is_forecast)
+    has_hist <- any(!df$is_forecast)
     
     p <- ggplot(df, aes(x = luna_idx))
+
+    # Evidențiere vizuală zonă de prognoză viitoare (galben deschis)
+    if (has_fc) {
+      fc_idx   <- which(df$is_forecast)
+      first_fc <- min(fc_idx)
+      last_fc  <- nrow(df)
+      p <- p + annotate("rect", xmin = first_fc - 0.5, xmax = last_fc + 0.5,
+                        ymin = -Inf, ymax = Inf, fill = "#fef9e7", alpha = 0.6)
+      if (has_hist && first_fc > 1) {
+        p <- p + geom_vline(xintercept = first_fc - 0.5, linetype = "dashed",
+                            color = "#d35400", linewidth = 1)
+      }
+    }
     
     if (mod == "pierdere") {
       # Grafic: Bani plătiți în plus din cauza deprecierii leului
@@ -344,7 +388,24 @@ server <- function(input, output, session) {
                      aes(y = plus_depreciere_fara_cum, shape = "⚡ Plafon atins/depășit (curs >= plafon)"),
                      color = "#e74c3c", size = 4.5, stroke = 1.5)
       }
+
+      # Evidențiere puncte din viitor (prognoză) cu inel portocaliu
+      puncte_viitor <- df[df$is_forecast, , drop = FALSE]
+      if (nrow(puncte_viitor) > 0) {
+        p <- p +
+          geom_point(data = puncte_viitor,
+                     aes(y = plus_depreciere_fara_cum),
+                     shape = 21, size = 4.5, stroke = 1.4, color = "#d35400", fill = "transparent",
+                     inherit.aes = FALSE)
+      }
       
+      subtitlu <- paste0(
+        "Chirie: ", input$chirie_eur, " EUR | Curs inițial: ", sprintf("%.4f", df$eur_ron[1]), " RON/EUR",
+        if (has_fc && has_hist) paste0(" | Zonă galbenă & inele portocalii: 🔮 Prognoză din ", df$month[min(which(df$is_forecast))])
+        else if (has_fc) " | 🔮 Toate lunile sunt prognoze/estimări viitoare"
+        else " | 🏛️ Toate lunile sunt date istorice reale BNR"
+      )
+
       p <- p +
         scale_fill_manual(values = c("Diferență lunară față de luna 1 (fără plafon)" = "#e74c3c")) +
         scale_color_manual(values = c("Diferență netă cumulată (fără plafon)" = "#c0392b",
@@ -353,7 +414,7 @@ server <- function(input, output, session) {
         labs(
           title = if (fara_pl) "Diferență față de cursul primei luni (fără plafon)"
                   else paste0("Diferență față de luna 1, fără și cu plafon de ", pl, " RON/EUR"),
-          subtitle = paste0("Chirie: ", input$chirie_eur, " EUR | Curs inițial: ", df$eur_ron[1], " RON/EUR | Punctele roșii indică lunile unde intervine plafonul"),
+          subtitle = subtitlu,
           x = "Luna", y = "RON", fill = NULL, color = NULL, shape = NULL
         )
     } else {
@@ -372,6 +433,22 @@ server <- function(input, output, session) {
                      aes(y = economie_cum, shape = "⚡ Plafon atins/depășit"),
                      color = "#e74c3c", size = 4.5, stroke = 1.5)
       }
+
+      puncte_viitor <- df[df$is_forecast, , drop = FALSE]
+      if (nrow(puncte_viitor) > 0) {
+        p <- p +
+          geom_point(data = puncte_viitor,
+                     aes(y = economie_cum),
+                     shape = 21, size = 5.2, stroke = 1.4, color = "#d35400", fill = "transparent",
+                     inherit.aes = FALSE)
+      }
+
+      subtitlu <- paste0(
+        "Chirie: ", input$chirie_eur, " EUR/lună",
+        if (has_fc && has_hist) paste0(" | Zonă galbenă & inele: 🔮 Prognoză din ", df$month[min(which(df$is_forecast))])
+        else if (has_fc) " | 🔮 Toate lunile sunt prognoze/estimări viitoare"
+        else " | 🏛️ Toate lunile sunt date istorice reale BNR"
+      )
       
       p <- p +
         scale_fill_manual(values = c("Economie lunară" = "#3498db")) +
@@ -380,7 +457,7 @@ server <- function(input, output, session) {
         labs(
           title = if (fara_pl) "Plafon dezactivat (Economie = 0)"
                   else paste0("Economie datorată plafonului de ", pl, " RON/EUR"),
-          subtitle = paste0("Chirie: ", input$chirie_eur, " EUR/lună | Punctele roșii marchează atingerea plafonului"),
+          subtitle = subtitlu,
           x = "Luna", y = "RON", fill = NULL, color = NULL, shape = NULL
         )
     }
@@ -403,7 +480,7 @@ server <- function(input, output, session) {
     
     table <- data.frame(
       Luna                    = df$month,
-      `Curs de referință`            = sprintf("%.4f", df$eur_ron),
+      `Curs de referință`     = sprintf("%.4f", df$eur_ron),
       `Curs aplic.`           = sprintf("%.4f", df$curs_aplicat),
       `Plafon activ?`         = ifelse(df$loveste_plafon, "⚡ DA", "nu"),
       `Plată fără plafon`     = sprintf("%.2f lei", df$plata_fara),
@@ -412,9 +489,13 @@ server <- function(input, output, session) {
       `Economie plafon cum.`  = sprintf("%.2f lei", df$economie_cum),
       check.names = FALSE
     )
-    if ("payment_date" %in% names(df)) {
-      table <- cbind(data.frame(`Data plății` = format(df$payment_date, "%d.%m.%Y"),
-                               `Tip curs` = df$rate_type, check.names = FALSE), table)
+    if ("payment_date" %in% names(df) || "rate_type" %in% names(df)) {
+      type_label <- if ("rate_type" %in% names(df)) {
+        ifelse(df$is_forecast, paste0("🔮 ", df$rate_type), paste0("🏛️ ", df$rate_type))
+      } else ifelse(df$is_forecast, "🔮 Prognoză", "🏛️ Istoric")
+      p_date <- if ("payment_date" %in% names(df)) format(df$payment_date, "%d.%m.%Y") else paste0("01.", df$month)
+      table <- cbind(data.frame(`Data plății` = p_date,
+                                `Tip curs` = type_label, check.names = FALSE), table)
     }
     table
   }, striped = TRUE, hover = TRUE, spacing = "s", align = "r")
@@ -449,7 +530,21 @@ server <- function(input, output, session) {
     ec_av_plaf <- round(tail(r$ec_s4, 1), 2)
     luni_plaf  <- sum(r$loveste_plafon)
 
+    n_past <- sum(!r$is_forecast)
+    n_fut  <- sum(r$is_forecast)
+    period_pill <- if (n_fut == 0) {
+      span(class = "badge bg-success", style = "font-size: 0.85em; padding: 6px 14px; border-radius: 20px;",
+           paste0("🏛️ Toate cele ", length(r$luni), " luni sunt date istorice reale BNR"))
+    } else if (n_past == 0) {
+      span(class = "badge bg-warning text-dark", style = "font-size: 0.85em; padding: 6px 14px; border-radius: 20px;",
+           paste0("🔮 Toate cele ", length(r$luni), " luni sunt prognoze / estimări viitoare"))
+    } else {
+      span(class = "badge bg-info text-dark", style = "font-size: 0.85em; padding: 6px 14px; border-radius: 20px;",
+           paste0("⚖️ Perioadă mixtă: ", n_past, " luni istorice reale (BNR) + ", n_fut, " luni prognoză viitoare (ING)"))
+    }
+
     tagList(
+      div(style = "text-align: center; margin-bottom: 12px;", period_pill),
       div(
         style = "display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px;",
         div(
@@ -487,12 +582,8 @@ server <- function(input, output, session) {
   output$plot_comparare <- renderPlot({
     r <- calc_tab2()
 
-    # Grafic suprapus direct:
-    # 1. Bani plătiți în plus (depreciere leului fără nicio protecție - lunar fără plafon)
-    # 2. Pierdere rămasă dacă plătești în blocuri de n luni (avans)
-    # 3. Pierdere rămasă dacă ai și plafon (când plafonul e activ)
-    # 4. Economia salvată prin plata în avans (blocuri n luni)
-    # 5. Economia totală dacă ai și plafon
+    has_fc   <- any(r$is_forecast)
+    has_hist <- any(!r$is_forecast)
 
     df_plot <- data.frame(
       idx   = rep(r$luni, 3),
@@ -518,9 +609,42 @@ server <- function(input, output, session) {
       df_plot <- rbind(df_plot, df_plafon)
     }
 
-    p <- ggplot(df_plot, aes(x = idx, y = val, color = strat, linetype = tip)) +
+    p <- ggplot(df_plot, aes(x = idx, y = val, color = strat, linetype = tip))
+
+    # Evidențiere vizuală zonă de prognoză viitoare (galben deschis)
+    if (has_fc) {
+      fc_idx   <- which(r$is_forecast)
+      first_fc <- min(fc_idx)
+      last_fc  <- length(r$luni)
+      p <- p + annotate("rect", xmin = first_fc - 0.5, xmax = last_fc + 0.5,
+                        ymin = -Inf, ymax = Inf, fill = "#fef9e7", alpha = 0.5)
+      if (has_hist && first_fc > 1) {
+        p <- p + geom_vline(xintercept = first_fc - 0.5, linetype = "dashed",
+                            color = "#d35400", linewidth = 1)
+      }
+    }
+
+    p <- p +
       geom_line(linewidth = 1.3) +
-      geom_point(size = 2.4) +
+      geom_point(size = 2.4)
+
+    # Inele portocalii pentru punctele din viitor (prognoză)
+    puncte_viitor <- df_plot[rep(r$is_forecast, if (!r$fara_pl) 5 else 3), , drop = FALSE]
+    if (nrow(puncte_viitor) > 0) {
+      p <- p + geom_point(data = puncte_viitor, aes(x = idx, y = val),
+                          shape = 21, size = 4.4, stroke = 1.3, color = "#d35400", fill = "transparent",
+                          inherit.aes = FALSE)
+    }
+
+    subtitle_txt <- paste0(
+      "Curs la pornire: ", sprintf("%.4f", r$curs_baza),
+      " RON/EUR | Chirie: ", input$chirie_eur, " EUR/lună | Plată directă în RON la curs BNR",
+      if (has_fc && has_hist) paste0(" | Zonă galbenă & inele: 🔮 Prognoză din ", r$months[min(which(r$is_forecast))])
+      else if (has_fc) " | 🔮 Toate datele sunt prognoze viitoare (estimări)"
+      else " | 🏛️ Toate datele sunt istorice reale (BNR)"
+    )
+
+    p <- p +
       scale_linetype_manual(
         name = "Tip indicator",
         values = c("Diferență vs luna 1" = "solid", "Bani economisiți" = "dashed")
@@ -528,10 +652,7 @@ server <- function(input, output, session) {
       scale_color_brewer(palette = "Set1", name = "Strategie & Impact") +
       labs(
         title = "Diferențe față de luna 1 și economii față de plata lunară (RON)",
-        subtitle = paste0(
-          "Curs la pornire: ", sprintf("%.4f", r$curs_baza),
-          " RON/EUR | Chirie: ", input$chirie_eur, " EUR/lună | Plată directă în RON la curs BNR"
-        ),
+        subtitle = subtitle_txt,
         x = "Luna", y = "RON (economie negativă = cost suplimentar)"
       )
 

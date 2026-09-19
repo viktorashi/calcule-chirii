@@ -93,14 +93,39 @@ cached_source <- function(key, url, parser, ttl, max_stale, force = FALSE,
   result(attempt, message = write_error)
 }
 
+load_bnr_history <- function(path = NULL) {
+  if (is.null(path) || !file.exists(path)) {
+    candidates <- c(
+      "R/bnr_history.csv",
+      file.path("..", "R", "bnr_history.csv"),
+      file.path(tools::R_user_dir("calcule-chirii", "data"), "bnr_history.csv")
+    )
+    for (cand in candidates) {
+      if (nzchar(cand) && file.exists(cand)) {
+        path <- cand
+        break
+      }
+    }
+  }
+  if (is.null(path) || !file.exists(path)) {
+    stop("Fișierul cu date istorice BNR (R/bnr_history.csv) nu a fost găsit.", call. = FALSE)
+  }
+  df <- utils::read.csv(path, stringsAsFactors = FALSE)
+  df$eur_ron <- suppressWarnings(as.numeric(df$eur_ron))
+  df$date <- as.Date(df$date)
+  df[order(df$month), c("month", "eur_ron", "date"), drop = FALSE]
+}
+
 load_live_sources <- function(force = FALSE, now = Sys.time(),
                               cache_dir = tools::R_user_dir("calcule-chirii", "cache"),
                               fetch = fetch_document) {
   if (!requireNamespace("xml2", quietly = TRUE))
     stop("Instalează pachetul R xml2 pentru date live: install.packages('xml2').", call. = FALSE)
+  history <- tryCatch(load_bnr_history(), error = function(e) NULL)
   list(
     bnr = cached_source("bnr", BNR_URL, parse_bnr, 3600, 7 * 86400, force, cache_dir, now, fetch),
-    ing = cached_source("ing", ING_URL, parse_ing, 86400, 30 * 86400, force, cache_dir, now, fetch)
+    ing = cached_source("ing", ING_URL, parse_ing, 86400, 30 * 86400, force, cache_dir, now, fetch),
+    history = history
   )
 }
 
@@ -112,29 +137,86 @@ monthly_payment_dates <- function(start, count) {
 }
 
 build_live_rates <- function(sources, start_month, today = bucharest_today()) {
+  history <- if (!is.null(sources$history)) sources$history else load_bnr_history()
   current_month <- format(today, "%Y-%m")
   start_month <- format(as.Date(start_month), "%Y-%m")
-  if (is.na(start_month) || start_month < current_month)
-    stop("Modul live începe în luna curentă sau în viitor. Pentru trecut, folosește CSV.", call. = FALSE)
+  if (is.na(start_month))
+    stop("Luna de început este invalidă.", call. = FALSE)
+
+  min_hist <- if (!is.null(history) && nrow(history) > 0) min(history$month) else current_month
+  if (start_month < min_hist)
+    stop(sprintf("Datele istorice BNR sunt disponibile începând cu %s. Alege altă lună sau folosește CSV.", min_hist), call. = FALSE)
+
   bnr <- sources$bnr$data
   bnr_age <- as.integer(today - bnr$date)
   if (bnr_age < 0 || bnr_age > 7)
     stop("Data cursului BNR nu este actuală (mai veche de 7 zile sau în viitor). Reîncearcă actualizarea.", call. = FALSE)
-  start <- if (start_month == current_month) today else as.Date(paste0(start_month, "-01"))
+
   points <- sources$ing$data$points
   points <- points[points$date > today, , drop = FALSE]
-  # The BNR rate is observed; intermediate future rates are estimates, not BNR.
-  dates <- monthly_payment_dates(start, 120)
   horizon <- if (nrow(points)) max(points$date) else today
+
+  if (as.Date(paste0(start_month, "-01")) > horizon)
+    stop("ING nu acoperă luna selectată. Alege altă lună sau folosește CSV.", call. = FALSE)
+
+  start <- if (start_month == current_month) today else as.Date(paste0(start_month, "-01"))
+
+  n_months <- max(12L, as.integer(ceiling(as.numeric(difftime(horizon, start, units = "days")) / 28)) + 3L)
+  dates <- monthly_payment_dates(start, n_months)
   dates <- dates[dates <= horizon]
   if (!length(dates)) stop("ING nu acoperă luna selectată. Alege altă lună sau folosește CSV.", call. = FALSE)
-  values <- if (!nrow(points)) rep(bnr$eur_ron, length(dates)) else {
-    approx(x = as.numeric(c(today, points$date)), y = c(bnr$eur_ron, points$eur_ron),
-           xout = as.numeric(dates), rule = 1)$y
+
+  months <- format(dates, "%Y-%m")
+  values <- numeric(length(dates))
+  rate_type <- character(length(dates))
+  is_forecast <- logical(length(dates))
+
+  # Viitor (prognoză / interpolare ING)
+  future_mask <- months > current_month
+  if (any(future_mask)) {
+    fut_dates <- dates[future_mask]
+    fut_vals <- if (!nrow(points)) rep(bnr$eur_ron, length(fut_dates)) else {
+      approx(x = as.numeric(c(today, points$date)), y = c(bnr$eur_ron, points$eur_ron),
+             xout = as.numeric(fut_dates), rule = 1)$y
+    }
+    values[future_mask] <- fut_vals
+    rate_type[future_mask] <- ifelse(fut_dates %in% points$date,
+                                     "Prognoză ING (sfârșit trimestru)",
+                                     "Estimare între repere ING")
+    is_forecast[future_mask] <- TRUE
   }
-  data.frame(month = format(dates, "%Y-%m"), eur_ron = values,
+
+  # Luna curentă
+  curr_mask <- months == current_month
+  if (any(curr_mask)) {
+    values[curr_mask] <- bnr$eur_ron
+    rate_type[curr_mask] <- ifelse(dates[curr_mask] == today, "BNR observat", "BNR observat (luna curentă)")
+    is_forecast[curr_mask] <- FALSE
+  }
+
+  # Trecut (istoric oficial BNR)
+  past_mask <- months < current_month
+  if (any(past_mask)) {
+    past_months <- months[past_mask]
+    hist_idx <- match(past_months, history$month)
+    if (anyNA(hist_idx)) {
+      missing_m <- past_months[is.na(hist_idx)]
+      stop(sprintf("Lipsesc date istorice BNR pentru lunile: %s.", paste(missing_m, collapse = ", ")), call. = FALSE)
+    }
+    values[past_mask] <- history$eur_ron[hist_idx]
+    rate_type[past_mask] <- "BNR istoric (observat)"
+    is_forecast[past_mask] <- FALSE
+  }
+
+  data.frame(month = months, eur_ron = values,
              payment_date = dates,
-             rate_type = ifelse(dates == today, "BNR observat",
-                        ifelse(dates %in% points$date, "Prognoză ING (sfârșit trimestru)",
-                               "Estimare între repere ING")))
+             rate_type = rate_type,
+             is_forecast = is_forecast,
+             stringsAsFactors = FALSE)
+}
+
+build_live_timeline <- function(sources, today = bucharest_today()) {
+  history <- if (!is.null(sources$history)) sources$history else load_bnr_history()
+  first_month <- if (!is.null(history) && nrow(history) > 0) min(history$month) else format(today, "%Y-%m")
+  build_live_rates(sources, as.Date(paste0(first_month, "-01")), today)
 }

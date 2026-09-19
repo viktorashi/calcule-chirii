@@ -67,8 +67,12 @@ check(live$payment_date[2], as.Date("2026-10-17"))
 check(live$eur_ron[2], 5.3 + (5.6 - 5.3) * 17 / 92)
 check(live$rate_type[1], "BNR observat")
 check(tail(live$month, 1), "2027-03")
-check(build_live_rates(sources, as.Date("2026-11-01"), today)$payment_date[1], as.Date("2026-11-01"))
-expect_error(build_live_rates(sources, as.Date("2026-08-01"), today), "trecut")
+# Historical start months now work and are marked as observed BNR history:
+hist_live <- build_live_rates(sources, as.Date("2026-08-01"), today)
+check(hist_live$payment_date[1], as.Date("2026-08-01"))
+check(hist_live$is_forecast[1], FALSE)
+check(hist_live$rate_type[1], "BNR istoric (observat)")
+expect_error(build_live_rates(sources, as.Date("2010-01-01"), today), "istorice")
 expect_error(build_live_rates(sources, as.Date("2027-04-01"), today), "acoperă")
 check(monthly_payment_dates(as.Date("2027-01-31"), 3), as.Date(c("2027-01-31", "2027-02-28", "2027-03-31")))
 check(monthly_payment_dates(as.Date("2028-01-31"), 3), as.Date(c("2028-01-31", "2028-02-29", "2028-03-31")))
@@ -97,6 +101,7 @@ env$load_live_sources <- function(force = FALSE) {
 env$bucharest_today <- function() today
 # build_live_rates' default is evaluated in its own environment.
 env$build_live_rates <- function(s, month) build_live_rates(s, month, today)
+env$build_live_timeline <- function(s) build_live_timeline(s, today)
 environment(server_live) <- env
 shiny::testServer(server_live, {
   session$setInputs(sursa_date = "live", luna_start = today, durata = 3, chirie_eur = 500,
@@ -120,4 +125,9 @@ shiny::testServer(server_live, {
   session$setInputs(sursa_date = "local")
   check(calc_tab1()$eur_ron[1], 5.29)
   check(calls, initial_calls + 1L)
+  session$setInputs(sursa_date = "live", luna_start = as.Date("2025-01-01"), durata = 3)
+  check(calc_tab1()$month[1], "2025-01")
+  check(calc_tab1()$is_forecast[1], FALSE)
+  check(calc_tab1()$rate_type[1], "BNR istoric (observat)")
+  check(calc_tab2()$is_forecast[1], FALSE)
 })

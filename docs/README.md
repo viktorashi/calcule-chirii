@@ -70,11 +70,12 @@ Deschide în browser: **<http://127.0.0.1:7474**>
 
 ## Date live și prognoze
 
-- **BNR:** [fluxul XML oficial](https://curs.bnr.ro/nbrfxrates.xml), fără cheie API. Se folosește ultimul curs EUR/RON publicat, nu media lunii. Data publicării este afișată; în weekend sau înainte de publicarea zilnică poate fi o zi anterioară.
+- **BNR & Istoric:** [fluxul XML oficial](https://curs.bnr.ro/nbrfxrates.xml) pentru cursul curent de azi, plus istoricul lunar oficial BNR inclus din ianuarie 2018 până în prezent (`R/bnr_history.csv`). Se poate simula începerea chiriei în trecut sau în viitor pe un timeline unificat.
 - **ING:** [tabelul public de prognoze FX](https://think.ing.com/forecasts/), preluat din HTML. Integrarea citește EUR/RON și antetele trimestriale din secțiunea FX; nu presupune existența unui API public ING. O modificare incompatibilă a paginii produce o eroare explicită și, dacă există, folosirea cache-ului valid.
-- ING publică repere de **sfârșit de trimestru**, nu cursuri BNR viitoare și nici o prognoză pentru fiecare lună. Aplicația estimează liniar, în funcție de numărul de zile, între cursul BNR disponibil azi și aceste repere. Aceste valori sunt etichetate separat în tabel.
-- Luna curentă înseamnă că șederea începe **azi**, în fusul `Europe/Bucharest`. Ratele următoare sunt estimate în aceeași zi a fiecărei luni, limitată la ultima zi a lunii când este necesar (31 ianuarie → 28/29 februarie → 31 martie). O lună viitoare selectată înseamnă începere în ziua 1.
-- Durata maximă este dată de ultimul reper ING. Nu se extrapolează după el și nu se completează automat cu CSV-ul vechi. Pentru un scenariu mai lung, selectează CSV propriu.
+- ING publică repere de **sfârșit de trimestru**, nu cursuri BNR viitoare și nici o prognoză pentru fiecare lună. Aplicația estimează liniar, în funcție de numărul de zile, între cursul BNR disponibil azi și aceste repere.
+- **Diferențiere clară în grafice și tabele:** Lunile viitoare (prognoze/estimări) sunt marcate vizual distinct prin zonă de fundal galbenă, linie de demarcație între istoric și viitor, inele portocalii pe puncte și etichete `🔮 Prognoză` vs `🏛️ BNR istoric (observat)`.
+- Luna curentă înseamnă că șederea începe **azi**, în fusul `Europe/Bucharest`. Ratele următoare sunt estimate în aceeași zi a fiecărei luni, limitată la ultima zi a lunii când este necesar (31 ianuarie → 28/29 februarie → 31 martie). Pentru simulări în trecut sau lună viitoare, începerea este pe ziua 1.
+- Durata maximă este dată de lunile disponibile până la ultimul reper ING. Nu se extrapolează după el.
 - La verificarea din 17 septembrie 2026, pagina ING acoperea până la 31 decembrie 2027. Orizontul este citit din sursă, nu fixat în cod.
 - O actualizare a prognozei poate schimba economiile în ambele sensuri; datele mai recente nu garantează o predicție mai precisă.
 
