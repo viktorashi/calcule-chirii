@@ -342,7 +342,7 @@ server <- function(input, output, session) {
           style = "text-align:center; padding:18px;",
           div(style = "margin-bottom: 10px;", period_pill),
           h2(style = "color:#c0392b; font-size:2.3em;",
-             paste0("Diferență netă: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
+             paste0("Pierderi totale cumulative: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#495057;",
              paste0("în ", luni, " luni față de cursul primei luni (fără niciun plafon de protecție)"))
         )
@@ -351,7 +351,7 @@ server <- function(input, output, session) {
           style = "text-align:center; padding:18px;",
           div(style = "margin-bottom: 10px;", period_pill),
           h2(style = "color:#b94a00; font-size:2.2em;",
-             paste0("Fără plafon, diferență netă: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
+             paste0("Fără plafon, pierderi totale cumulative: ", format(pierdere_totala_fara, big.mark = ".", decimal.mark = ","), " lei")),
           h4(style = "color:#1e824c; font-weight:600;",
              paste0("Plafonul de ", pl, " RON/EUR te protejează: economisești ", 
                     format(economie_totala, big.mark = ".", decimal.mark = ","), " lei (plafon atins în ", luni_plafonate, " din ", luni, " luni)"))
