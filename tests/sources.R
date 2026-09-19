@@ -22,6 +22,47 @@ expect_error(parse_ing(sub("<td>5.6</td>", "<td>-</td>", html_fixture, fixed = T
 expect_error(parse_ing(sub("4Q26F", "3Q26F", html_fixture)))
 expect_error(parse_ing("<html><body>Service unavailable</body></html>"))
 
+# Annual BNR parser and history auto-updater tests
+annual_fixture <- '<DataSet xmlns="https://www.bnr.ro/xsd"><Body><OrigCurrency>RON</OrigCurrency>
+  <Cube date="2025-01-03"><Rate currency="EUR">4.9750</Rate></Cube>
+  <Cube date="2025-01-06"><Rate currency="EUR">4.9760</Rate></Cube>
+  <Cube date="2025-02-03"><Rate currency="EUR" multiplier="100">498.10</Rate></Cube>
+</Body></DataSet>'
+ann <- parse_bnr_annual(annual_fixture)
+check(nrow(ann), 2L)
+check(ann$month, c("2025-01", "2025-02"))
+check(ann$eur_ron, c(4.9750, 4.9810))
+check(ann$date, as.Date(c("2025-01-03", "2025-02-03")))
+expect_error(parse_bnr_annual('<DataSet><Body><Cube date="2025-01-03"><Rate currency="USD">4.5</Rate></Cube></Body></DataSet>'))
+expect_error(parse_bnr_annual('<DataSet><Body><Cube date="2025-01-03"><Rate currency="EUR">-1</Rate></Cube></Body></DataSet>'))
+
+# load_bnr_history strict validation
+bad_csv <- tempfile(fileext = ".csv")
+writeLines("month,eur_ron,date\n2025-01,-4.95,2025-01-03", bad_csv)
+expect_error(load_bnr_history(cache_dir = tempdir(), shipped_path = bad_csv), "lipsă sau negative")
+writeLines("month,eur_ron,date\n2025-01,not_a_num,2025-01-03", bad_csv)
+expect_error(load_bnr_history(cache_dir = tempdir(), shipped_path = bad_csv), "lipsă sau negative")
+writeLines("wrong,headers\n1,2", bad_csv)
+expect_error(load_bnr_history(cache_dir = tempdir(), shipped_path = bad_csv), "invalid sau gol")
+unlink(bad_csv)
+
+# update_bnr_history: fetch missing months and write to cache
+hist_mock <- data.frame(month = "2024-12", eur_ron = 4.97, date = as.Date("2024-12-02"), stringsAsFactors = FALSE)
+hist_cache <- tempfile()
+annual_fetch <- function(url) charToRaw(annual_fixture)
+updated <- update_bnr_history(hist_mock, as.Date("2025-03-01"), hist_cache, annual_fetch)
+check(nrow(updated), 3L)
+check(updated$month, c("2024-12", "2025-01", "2025-02"))
+check(file.exists(file.path(hist_cache, "bnr_history.csv")), TRUE)
+
+# Calling again when up-to-date does not fetch
+fetch_called <- FALSE
+no_fetch <- function(url) { fetch_called <<- TRUE; stop("should not be called") }
+cached_again <- update_bnr_history(updated, as.Date("2025-03-01"), hist_cache, no_fetch)
+check(fetch_called, FALSE)
+check(nrow(cached_again), 3L)
+unlink(hist_cache, recursive = TRUE)
+
 stamp <- as.POSIXct("2026-09-17 14:00:00", tz = "UTC")
 cache <- tempfile()
 requests <- 0L
@@ -130,4 +171,10 @@ shiny::testServer(server_live, {
   check(calc_tab1()$is_forecast[1], FALSE)
   check(calc_tab1()$rate_type[1], "BNR istoric (observat)")
   check(calc_tab2()$is_forecast[1], FALSE)
+  # Ensure all plots render without error in both modes
+  session$setInputs(durata = 16, mod_vedere_tab1 = "pierdere")
+  check(is.list(output$plot_economie), TRUE)
+  session$setInputs(mod_vedere_tab1 = "economie")
+  check(is.list(output$plot_economie), TRUE)
+  check(is.list(output$plot_comparare), TRUE)
 })

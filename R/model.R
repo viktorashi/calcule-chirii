@@ -47,6 +47,9 @@ calculate_cap <- function(df, chirie, pl = Inf) {
     # Indicator: atinge sau depășește plafonul?
     df$loveste_plafon     <- !fara_pl & (df$eur_ron >= pl)
     df$luna_idx           <- seq_len(nrow(df))
+    if (is.null(df$is_forecast)) df$is_forecast <- rep(FALSE, nrow(df))
+    if (is.null(df$rate_type)) df$rate_type <- rep("Nespecificat", nrow(df))
+    if (is.null(df$payment_date)) df$payment_date <- as.Date(paste0(df$month, "-01"))
     df
 }
 

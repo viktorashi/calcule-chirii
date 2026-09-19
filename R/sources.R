@@ -1,5 +1,6 @@
 # Official BNR observations and ING end-of-quarter forecasts.
 BNR_URL <- "https://curs.bnr.ro/nbrfxrates.xml"
+BNR_ANNUAL_URL <- "https://curs.bnr.ro/files/xml/years/nbrfxrates%d.xml"
 ING_URL <- "https://think.ing.com/forecasts/"
 
 bucharest_today <- function(now = Sys.time()) {
@@ -60,6 +61,28 @@ parse_ing <- function(document) {
   list(points = points, published_label = label)
 }
 
+# Parse a BNR annual XML file (one year of daily rates).
+# Returns one EUR/RON rate per month (first available trading day).
+parse_bnr_annual <- function(document) {
+  doc <- xml2::read_xml(document, options = "NONET")
+  nodes <- xml2::xml_find_all(doc, "//*[local-name()='Cube']/*[local-name()='Rate' and @currency='EUR']")
+  if (!length(nodes)) stop("XML-ul anual BNR nu conține cursuri EUR.", call. = FALSE)
+  dates <- as.Date(xml2::xml_attr(xml2::xml_parent(nodes), "date"), format = "%Y-%m-%d")
+  rates <- suppressWarnings(as.numeric(xml2::xml_text(nodes)))
+  multiplier <- xml2::xml_attr(nodes, "multiplier")
+  multiplier[is.na(multiplier)] <- "1"
+  multiplier <- suppressWarnings(as.numeric(multiplier))
+  if (anyNA(dates) || any(!is.finite(rates) | rates <= 0) ||
+      any(!is.finite(multiplier) | multiplier <= 0))
+    stop("XML-ul anual BNR conține cursuri EUR invalide.", call. = FALSE)
+  df <- data.frame(date = dates, eur_ron = rates / multiplier, stringsAsFactors = FALSE)
+  df <- df[order(df$date), ]
+  df$month <- format(df$date, "%Y-%m")
+  df <- df[!duplicated(df$month), c("month", "eur_ron", "date"), drop = FALSE]
+  rownames(df) <- NULL
+  df
+}
+
 # Store only successfully parsed responses. Atomic replacement preserves the last
 # good response across failures; the directory can be shared by Shiny sessions.
 cached_source <- function(key, url, parser, ttl, max_stale, force = FALSE,
@@ -93,27 +116,74 @@ cached_source <- function(key, url, parser, ttl, max_stale, force = FALSE,
   result(attempt, message = write_error)
 }
 
-load_bnr_history <- function(path = NULL) {
-  if (is.null(path) || !file.exists(path)) {
+# Load BNR monthly history. Tries the cached (auto-updated) version first, then
+# the shipped bootstrap CSV. Validates that all rates are finite and positive.
+load_bnr_history <- function(cache_dir = tools::R_user_dir("calcule-chirii", "cache"),
+                              shipped_path = "R/bnr_history.csv") {
+  cached_path <- file.path(cache_dir, "bnr_history.csv")
+  path <- if (file.exists(cached_path)) {
+    cached_path
+  } else {
     candidates <- c(
-      "R/bnr_history.csv",
-      file.path("..", "R", "bnr_history.csv"),
+      shipped_path,
+      "bnr_history.csv",
+      file.path("..", shipped_path),
+      file.path("..", "bnr_history.csv"),
       file.path(tools::R_user_dir("calcule-chirii", "data"), "bnr_history.csv")
     )
-    for (cand in candidates) {
-      if (nzchar(cand) && file.exists(cand)) {
-        path <- cand
-        break
-      }
-    }
+    found <- candidates[nzchar(candidates) & file.exists(candidates)]
+    if (length(found) > 0) found[1] else NULL
   }
   if (is.null(path) || !file.exists(path)) {
-    stop("Fișierul cu date istorice BNR (R/bnr_history.csv) nu a fost găsit.", call. = FALSE)
+    stop("Fișierul cu date istorice BNR nu a fost găsit.", call. = FALSE)
   }
   df <- utils::read.csv(path, stringsAsFactors = FALSE)
+  if (!all(c("month", "eur_ron", "date") %in% names(df)) || nrow(df) == 0)
+    stop("Fișierul cu date istorice BNR este invalid sau gol.", call. = FALSE)
   df$eur_ron <- suppressWarnings(as.numeric(df$eur_ron))
   df$date <- as.Date(df$date)
+  if (any(!is.finite(df$eur_ron) | df$eur_ron <= 0) || anyNA(df$date))
+    stop("Fișierul cu date istorice BNR conține cursuri lipsă sau negative.", call. = FALSE)
   df[order(df$month), c("month", "eur_ron", "date"), drop = FALSE]
+}
+
+# Fetch BNR annual XMLs for any months missing from history (up to last month)
+# and save the merged result to the cache directory.  Failures are non-fatal;
+# the best available history is always returned.
+update_bnr_history <- function(history, today, cache_dir, fetch) {
+  prev_month <- format(seq(as.Date(format(today, "%Y-%m-01")),
+                           by = "-1 month", length.out = 2)[2], "%Y-%m")
+  if (!is.null(history) && nrow(history) > 0 && max(history$month) >= prev_month)
+    return(history)
+  last_year <- if (!is.null(history) && nrow(history) > 0) {
+    as.integer(substr(max(history$month), 1, 4))
+  } else 2018L
+  current_year <- as.integer(format(today, "%Y"))
+  new_rows <- list()
+  for (y in seq(last_year, current_year)) {
+    url <- sprintf(BNR_ANNUAL_URL, y)
+    annual <- tryCatch(parse_bnr_annual(fetch(url)), error = function(e) NULL)
+    if (!is.null(annual)) new_rows[[length(new_rows) + 1L]] <- annual
+  }
+  if (!length(new_rows)) return(history)
+  fresh <- do.call(rbind, new_rows)
+  fresh <- fresh[!duplicated(fresh$month), , drop = FALSE]
+  if (!is.null(history) && nrow(history) > 0) {
+    keep <- history[!(history$month %in% fresh$month), , drop = FALSE]
+    fresh <- rbind(keep, fresh)
+  }
+  fresh <- fresh[!duplicated(fresh$month), , drop = FALSE]
+  fresh <- fresh[order(fresh$month), c("month", "eur_ron", "date"), drop = FALSE]
+  rownames(fresh) <- NULL
+  tryCatch({
+    dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+    path <- file.path(cache_dir, "bnr_history.csv")
+    tmp <- tempfile(pattern = "bnr_history-", tmpdir = cache_dir, fileext = ".csv")
+    on.exit(unlink(tmp), add = TRUE)
+    utils::write.csv(fresh, tmp, row.names = FALSE)
+    if (!file.rename(tmp, path)) stop("rename failed")
+  }, error = function(e) NULL)
+  fresh
 }
 
 load_live_sources <- function(force = FALSE, now = Sys.time(),
@@ -121,7 +191,10 @@ load_live_sources <- function(force = FALSE, now = Sys.time(),
                               fetch = fetch_document) {
   if (!requireNamespace("xml2", quietly = TRUE))
     stop("Instalează pachetul R xml2 pentru date live: install.packages('xml2').", call. = FALSE)
-  history <- tryCatch(load_bnr_history(), error = function(e) NULL)
+  history <- tryCatch(load_bnr_history(cache_dir), error = function(e) NULL)
+  today <- bucharest_today(now)
+  history <- tryCatch(update_bnr_history(history, today, cache_dir, fetch),
+                      error = function(e) history)
   list(
     bnr = cached_source("bnr", BNR_URL, parse_bnr, 3600, 7 * 86400, force, cache_dir, now, fetch),
     ing = cached_source("ing", ING_URL, parse_ing, 86400, 30 * 86400, force, cache_dir, now, fetch),
@@ -215,6 +288,9 @@ build_live_rates <- function(sources, start_month, today = bucharest_today()) {
              stringsAsFactors = FALSE)
 }
 
+# Build the full available timeline from the earliest historical month to the
+# last ING forecast.  Used by date_curs() to populate the date picker range;
+# the actual calculation uses build_live_rates() with the user-selected start.
 build_live_timeline <- function(sources, today = bucharest_today()) {
   history <- if (!is.null(sources$history)) sources$history else load_bnr_history()
   first_month <- if (!is.null(history) && nrow(history) > 0) min(history$month) else format(today, "%Y-%m")
