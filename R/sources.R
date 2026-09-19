@@ -229,33 +229,66 @@ build_live_rates <- function(sources, start_month, today = bucharest_today()) {
   points <- points[points$date > today, , drop = FALSE]
   horizon <- if (nrow(points)) max(points$date) else today
 
-  if (as.Date(paste0(start_month, "-01")) > horizon)
+  if (!nrow(points) && as.Date(paste0(start_month, "-01")) > today)
     stop("ING nu acoperă luna selectată. Alege altă lună sau folosește CSV.", call. = FALSE)
+
+  # Orizont maxim de selecție: până la 3 ani în viitor
+  max_horizon <- seq(as.Date(format(today, "%Y-%m-01")), by = "36 months", length.out = 2)[2] - 1
+  if (as.Date(paste0(start_month, "-01")) > max_horizon)
+    stop("Orizontul maxim de prognoză este de 3 ani (36 luni). Alege altă lună sau folosește CSV.", call. = FALSE)
 
   start <- if (start_month == current_month) today else as.Date(paste0(start_month, "-01"))
 
-  n_months <- max(12L, as.integer(ceiling(as.numeric(difftime(horizon, start, units = "days")) / 28)) + 3L)
+  # Generăm cel puțin 36 de luni de la start_month (sau până la today + 36 luni)
+  months_to_today <- max(0L, as.integer(ceiling(as.numeric(difftime(today, start, units = "days")) / 28)))
+  n_months <- max(36L, months_to_today + 36L)
   dates <- monthly_payment_dates(start, n_months)
-  dates <- dates[dates <= horizon]
-  if (!length(dates)) stop("ING nu acoperă luna selectată. Alege altă lună sau folosește CSV.", call. = FALSE)
+  if (!nrow(points)) dates <- dates[dates <= today]
 
   months <- format(dates, "%Y-%m")
   values <- numeric(length(dates))
   rate_type <- character(length(dates))
   is_forecast <- logical(length(dates))
 
-  # Viitor (prognoză / interpolare ING)
+  # Viitor (prognoză ING + extrapolare trend până la 3 ani)
   future_mask <- months > current_month
   if (any(future_mask)) {
     fut_dates <- dates[future_mask]
-    fut_vals <- if (!nrow(points)) rep(bnr$eur_ron, length(fut_dates)) else {
-      approx(x = as.numeric(c(today, points$date)), y = c(bnr$eur_ron, points$eur_ron),
-             xout = as.numeric(fut_dates), rule = 1)$y
+    fut_vals <- numeric(length(fut_dates))
+    fut_types <- character(length(fut_dates))
+
+    # Segment 1: În cadrul orizontului ING (interpolare exactă)
+    ing_mask <- fut_dates <= horizon
+    if (any(ing_mask)) {
+      ing_dates <- fut_dates[ing_mask]
+      ing_vals <- if (!nrow(points)) rep(bnr$eur_ron, length(ing_dates)) else {
+        approx(x = as.numeric(c(today, points$date)), y = c(bnr$eur_ron, points$eur_ron),
+               xout = as.numeric(ing_dates), rule = 1)$y
+      }
+      fut_vals[ing_mask] <- ing_vals
+      fut_types[ing_mask] <- ifelse(ing_dates %in% points$date,
+                                    "Prognoză ING (sfârșit trimestru)",
+                                    "Estimare între repere ING")
     }
+
+    # Segment 2: După orizontul ING (extrapolare trend 3 ani)
+    ext_mask <- fut_dates > horizon
+    if (any(ext_mask)) {
+      ext_dates <- fut_dates[ext_mask]
+      all_pts <- rbind(data.frame(date = today, eur_ron = bnr$eur_ron), points)
+      slope <- if (nrow(all_pts) >= 2) {
+        fit <- stats::lm(eur_ron ~ as.numeric(date), data = all_pts)
+        max(0, stats::coef(fit)[2])
+      } else {
+        0.00015 # ~0.05 RON / an (~1% anual, media istorică BNR)
+      }
+      base_rate <- if (nrow(points)) points$eur_ron[nrow(points)] else bnr$eur_ron
+      fut_vals[ext_mask] <- base_rate + slope * as.numeric(ext_dates - horizon)
+      fut_types[ext_mask] <- "Prognoză extinsă (trend 3 ani)"
+    }
+
     values[future_mask] <- fut_vals
-    rate_type[future_mask] <- ifelse(fut_dates %in% points$date,
-                                     "Prognoză ING (sfârșit trimestru)",
-                                     "Estimare între repere ING")
+    rate_type[future_mask] <- fut_types
     is_forecast[future_mask] <- TRUE
   }
 
