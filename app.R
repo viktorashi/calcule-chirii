@@ -163,7 +163,7 @@ ui <- page_navbar(
         width = 300,
         h5("Opțiuni Strategii"),
         helpText("Primești salariul în RON și achiți direct proprietarului în RON la cursul oficial BNR, fără comisioane bancare/valutare."),
-        sliderInput("c2_n", "n = luni achitate odată (în avans)", 1, 12, 3, 1),
+        sliderInput("c2_n", "n = luni achitate odată (în avans)", 1, 24, 3, 1),
         hr(),
         h5("Garanție (RON)"),
         numericInput("c2_avans_luni", "Garanție inițială (luni chirii)",
