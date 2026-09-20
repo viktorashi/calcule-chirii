@@ -107,6 +107,14 @@ shiny::testServer(server, {
   check(calc_tab2()$n, 24L)
   session$setInputs(c2_n = 25)
   check(inherits(tryCatch(calc_tab2(), error = identity), "shiny.silent.error"), TRUE)
+  sent_date <- NULL
+  orig_send <- session$sendInputMessage
+  session$sendInputMessage <- function(id, message) {
+    if (id == "luna_start") sent_date <<- message$value
+    orig_send(id, message)
+  }
+  session$setInputs(snap_today = 1)
+  check(sent_date, format(bucharest_today(), "%Y-%m-01"))
 })
 source("tests/sources.R")
 cat(sprintf("Passed %d calculation, CSV and Shiny integration checks.\n", checks))

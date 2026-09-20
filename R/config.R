@@ -38,8 +38,8 @@ PARAM_CONFIG <- list(
 
 # Sintagme comune refolosite în textele UI (deduplicare)
 difference_first_month <- "Diferență cumulată față de luna 1"
-diff_luna_1            <- "Diferență față de luna 1"
-diff_vs_l1             <- "Diferență vs luna 1"
+diff_luna_1            <- "Diferență cumulată față de luna 1"
+diff_vs_l1             <- "Diferență cumulată vs luna 1"
 fara_plafon_suffix     <- "(fără plafon)"
 
 # Dicționar centralizat pentru toate textele și etichetele afișate în UI
@@ -54,6 +54,7 @@ UI_STRINGS <- list(
   sidebar = list(
     general_header   = "⚙️ Parametri Generali",
     luna_start_label = "Prima lună de chirie",
+    snap_today_btn   = "📅 Luna curentă (Azi)",
     plafon_header    = "Plafon negociat curs",
     fara_plafon_label = "Fără plafon (Plafon = ∞)",
     sursa_header     = "Date curs EUR/RON",

@@ -96,6 +96,9 @@ ui <- page_navbar(
                  max = PARAM_CONFIG$chirie$max,
                  step = PARAM_CONFIG$chirie$step),
     uiOutput("month_picker"),
+    div(style = "margin-top: -8px; margin-bottom: 12px;",
+        actionButton("snap_today", UI_STRINGS$sidebar$snap_today_btn,
+                     class = "btn-sm btn-outline-secondary w-100")),
     textOutput("curs_selectat"),
     sliderInput("durata", PARAM_CONFIG$durata$label,
                 min = PARAM_CONFIG$durata$min,
@@ -229,6 +232,10 @@ ui <- page_navbar(
 server <- function(input, output, session) {
 
   output$month_picker <- renderUI(month_input())
+  observeEvent(input$snap_today, {
+    updateDateInput(session, "luna_start",
+                    value = as.Date(format(bucharest_today(), "%Y-%m-01")))
+  })
   last_refresh <- 0L
   live_sources <- reactive({
     req(identical(input$sursa_date, "live"))
