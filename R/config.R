@@ -20,7 +20,7 @@ PARAM_CONFIG <- list(
     error_msg = function(min, max) sprintf("Plafonul trebuie să fie între %.2f și %.2f RON/EUR.", min, max)
   ),
   avans_bloc = list(
-    label = "n = luni achitate odată (în avans)",
+    label = "n = luni achitate odată (în avans). Echivalent cu renegociere o data la `n` luni",
     min = 1, max = 36, default = 3, step = 1,
     error_msg = function(min, max) sprintf("Numărul de luni în avans trebuie să fie întreg, între %d și %d.", min, max)
   ),
